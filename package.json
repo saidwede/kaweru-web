@@ -7,10 +7,12 @@
     "build": "next build",
     "start": "next start",
     "seed": "tsx src/scripts/seed.ts",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:security": "tsx src/tests/security-lifecycle.test.ts"
   },
   "dependencies": {
     "firebase-admin": "^14.5.0",
+    "html5-qrcode": "^2.3.8",
     "lucide-react": "^1.66.0",
     "mongoose": "^9.11.4",
     "next": "16.4.3",

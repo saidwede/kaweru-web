@@ -41,6 +41,9 @@ export interface IBooking extends Document {
   rescheduledAt?: Date | null;
   rescheduleFeeFcfa?: number;
   isSettledToCompany: boolean;
+  couponCode?: string | null;
+  /** Paiement reçu après expiration alors qu'il ne restait plus de place : à rembourser. */
+  needsRefund?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -89,11 +92,16 @@ const BookingSchema = new Schema<IBooking>(
     rescheduledAt: { type: Date, default: null },
     rescheduleFeeFcfa: { type: Number, default: 0 },
     isSettledToCompany: { type: Boolean, default: false, index: true },
+    couponCode: { type: String, default: null, uppercase: true },
+    needsRefund: { type: Boolean, default: false, index: true },
   },
   {
     timestamps: true,
   }
 );
+
+// Balayage des réservations expirées (status + lockedUntil)
+BookingSchema.index({ status: 1, lockedUntil: 1 });
 
 export const Booking: Model<IBooking> =
   mongoose.models.Booking || mongoose.model<IBooking>("Booking", BookingSchema);

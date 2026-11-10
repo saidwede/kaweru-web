@@ -1,75 +1,123 @@
 import { NextRequest } from "next/server";
+import { isValidObjectId } from "mongoose";
 import { getApps, initializeApp, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { AppError } from "./errors";
 import { connectToDatabase } from "./mongodb";
+import { readSessionToken, verifySessionToken, SessionData } from "./session";
 import { User, IUser, UserRole } from "@/models/User";
 
 if (!getApps().length) {
   try {
     const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
     if (serviceAccountKey) {
-      const serviceAccount = JSON.parse(serviceAccountKey);
-      initializeApp({
-        credential: cert(serviceAccount),
-      });
+      initializeApp({ credential: cert(JSON.parse(serviceAccountKey)) });
     } else {
-      initializeApp({
-        projectId: process.env.FIREBASE_PROJECT_ID || "kaweru-app",
-      });
+      // La vérification des ID tokens ne nécessite que le projectId.
+      initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || "kaweru-app" });
     }
   } catch (error) {
-    console.warn("[Firebase Admin] Initialisé en mode fallback/développement:", error);
+    console.warn("[Firebase Admin] Initialisation impossible:", error);
   }
 }
 
-export interface AuthenticatedUser {
-  firebaseUid: string;
+export const STAFF_ROLES: UserRole[] = [
+  "SUPER_ADMIN",
+  "COMPANY_ADMIN",
+  "STATION_MANAGER",
+  "TICKET_AGENT",
+  "ONBOARD_CONDUCTOR",
+];
+
+export interface AuthSession {
+  uid: string;
+  role: UserRole;
+  companyId: string | null;
   phone?: string;
   email?: string;
-  userDoc?: IUser | null;
-  role: UserRole;
+  name?: string;
+  token: SessionData;
+  user: IUser;
 }
 
-export async function authenticateRequest(req: NextRequest): Promise<AuthenticatedUser> {
-  const authHeader = req.headers.get("authorization");
+export async function findUserBySessionUid(uid: string): Promise<IUser | null> {
+  const conditions: Record<string, unknown>[] = [{ firebaseUid: uid }];
+  if (isValidObjectId(uid)) conditions.push({ _id: uid });
+  return User.findOne({ $or: conditions });
+}
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+/**
+ * Vérifie la signature de la session puis relit l'utilisateur en base :
+ * le rôle, la compagnie et le statut actif viennent toujours de MongoDB,
+ * jamais du jeton (un agent suspendu ou rétrogradé perd l'accès immédiatement).
+ */
+export async function getAuthSession(req: NextRequest): Promise<AuthSession | null> {
+  const token = verifySessionToken(readSessionToken(req));
+  if (!token) return null;
+
+  await connectToDatabase();
+  const user = await findUserBySessionUid(token.uid);
+  if (!user || !user.isActive) return null;
+
+  return {
+    uid: token.uid,
+    role: user.role,
+    companyId: user.companyId ? user.companyId.toString() : null,
+    phone: user.phone,
+    email: user.email,
+    name: user.fullName,
+    token,
+    user,
+  };
+}
+
+/** Variante qui lève une AppError (401 / 403) — à utiliser avec handleApiError. */
+export async function requireSession(req: NextRequest, allowedRoles?: UserRole[]): Promise<AuthSession> {
+  const session = await getAuthSession(req);
+  if (!session) {
     throw new AppError("Authentification requise", "UNAUTHORIZED", 401);
   }
-
-  const token = authHeader.split(" ")[1];
-
-  // Bypass pour les tests locaux / Apple Review mock backdoor
-  if (process.env.NODE_ENV !== "production" && token === "dev-token-superadmin") {
-    return {
-      firebaseUid: "dev_superadmin_uid",
-      phone: "+2290100000000",
-      role: "SUPER_ADMIN",
-    };
-  }
-
-  try {
-    const decodedToken = await getAuth().verifyIdToken(token);
-    await connectToDatabase();
-
-    const userDoc = await User.findOne({ firebaseUid: decodedToken.uid });
-
-    return {
-      firebaseUid: decodedToken.uid,
-      phone: decodedToken.phone_number,
-      email: decodedToken.email,
-      userDoc,
-      role: userDoc?.role || "PASSENGER",
-    };
-  } catch (err: unknown) {
-    const errorMessage = err instanceof Error ? err.message : "Jeton invalide";
-    throw new AppError(`Échec d'authentification: ${errorMessage}`, "UNAUTHORIZED", 401);
-  }
+  if (allowedRoles) authorizeRoles(session.role, allowedRoles);
+  return session;
 }
+
+/** Conservé pour compatibilité avec les routes existantes. */
+export const authenticateRequest = (req: NextRequest) => requireSession(req);
 
 export function authorizeRoles(userRole: UserRole, allowedRoles: UserRole[]): void {
   if (!allowedRoles.includes(userRole)) {
     throw new AppError("Accès non autorisé pour ce profil", "FORBIDDEN", 403);
+  }
+}
+
+/** Un membre du personnel ne peut agir que sur sa propre compagnie (sauf Super Admin). */
+export function assertCompanyAccess(session: AuthSession, companyId: unknown): void {
+  if (session.role === "SUPER_ADMIN") return;
+  if (!session.companyId || String(companyId) !== session.companyId) {
+    throw new AppError("Ressource d'une autre compagnie", "FORBIDDEN", 403);
+  }
+}
+
+export interface VerifiedGoogleIdentity {
+  uid: string;
+  email: string;
+  name?: string;
+}
+
+/** Vérifie un ID token Firebase (connexion Google) côté serveur. */
+export async function verifyGoogleIdToken(idToken: string): Promise<VerifiedGoogleIdentity> {
+  try {
+    const decoded = await getAuth().verifyIdToken(idToken, true);
+    if (!decoded.email || decoded.email_verified !== true) {
+      throw new AppError("Adresse e-mail Google non vérifiée.", "UNAUTHORIZED", 401);
+    }
+    return {
+      uid: decoded.uid,
+      email: decoded.email.trim().toLowerCase(),
+      name: typeof decoded.name === "string" ? decoded.name : undefined,
+    };
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    throw new AppError("Jeton Google invalide ou expiré.", "UNAUTHORIZED", 401);
   }
 }

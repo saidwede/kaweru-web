@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/mongodb";
 import { Booking } from "@/models/Booking";
-import { Trip } from "@/models/Trip";
+import { isValidObjectId } from "mongoose";
+import { expireBookingIfStale } from "@/lib/bookingLifecycle";
 import { handleApiError, AppError } from "@/lib/errors";
 
 export async function GET(
@@ -12,23 +13,18 @@ export async function GET(
     await connectToDatabase();
     const { id } = await params;
 
+    if (!isValidObjectId(id)) {
+      throw new AppError("Réservation introuvable", "NOT_FOUND", 404);
+    }
+
     const booking = await Booking.findById(id).populate("companyId", "name logoUrl");
     if (!booking) {
       throw new AppError("Réservation introuvable", "NOT_FOUND", 404);
     }
 
-    const now = new Date();
-
-    // Libération automatique à la volée (Zéro Cron obligatoire) :
-    // Si la réservation est toujours en attente et que les 7 minutes ont expiré
-    if (booking.status === "PENDING_PAYMENT" && now > booking.lockedUntil) {
-      booking.status = "EXPIRED";
-      await booking.save();
-
-      // Restitue les sièges au voyage
-      await Trip.findByIdAndUpdate(booking.tripId, {
-        $inc: { availableSeats: 1, lockedSeats: -1 },
-      });
+    // Libération à la volée si le verrou de paiement a expiré (rend toutes les places réservées)
+    if (booking.status === "PENDING_PAYMENT" && new Date() > booking.lockedUntil) {
+      if (await expireBookingIfStale(booking._id)) booking.status = "EXPIRED";
     }
 
     return NextResponse.json({

@@ -1,66 +1,80 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Bus, Users, Clock, MapPin, ArrowRight, RefreshCw, AlertCircle, LogOut, Gift, Check } from "lucide-react";
+import type { UserProfile, TripSummary, AgentItem, BookingItem, CompanyItem, TabType, ValidationMode } from "./_components/types";
+import { filterTrips, filterBookings } from "./_components/utils";
+import PortalSidebar from "./_components/PortalSidebar";
+import PortalHeader from "./_components/PortalHeader";
+import NotificationBanner from "./_components/NotificationBanner";
+import KpiBanner from "./_components/KpiBanner";
+import ValidatorTab from "./_components/ValidatorTab";
+import TripsTab from "./_components/TripsTab";
+import TicketsTab from "./_components/TicketsTab";
+import AgentsTab from "./_components/AgentsTab";
+import AddTripModal from "./_components/AddTripModal";
+import AddAgentModal from "./_components/AddAgentModal";
 
-interface TripSummary {
-  _id: string;
-  tripCode: string;
-  companyName: string;
-  originCity: string;
-  destinationCity: string;
-  departureDate: string;
-  departureTime: string;
-  busPlateNumber?: string;
-  totalQuota: number;
-  availableSeats: number;
-  soldSeats: number;
-  status: string;
-}
-
-export default function ManifestListPage() {
+export default function MasterExploitationPortal() {
   const router = useRouter();
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [activeTab, setActiveTab] = useState<TabType>("VALIDATOR");
+  const [validationMode, setValidationMode] = useState<ValidationMode>("CODE");
+
+  // Données du portail
   const [trips, setTrips] = useState<TripSummary[]>([]);
+  const [agents, setAgents] = useState<AgentItem[]>([]);
+  const [bookings, setBookings] = useState<BookingItem[]>([]);
+  const [companies, setCompanies] = useState<CompanyItem[]>([]);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string>("");
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notificationMsg, setNotificationMsg] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
 
-  // Configuration Admin des points de parrainage par achat du filleul
-  const [pointsPerPurchase, setPointsPerPurchase] = useState<number>(100);
-  const [savingReferral, setSavingReferral] = useState(false);
-  const [referralSaved, setReferralSaved] = useState(false);
+  // Recherche & Filtres
+  const [tripSearch, setTripSearch] = useState("");
+  const [ticketSearch, setTicketSearch] = useState("");
+  const [dateFilter, setDateFilter] = useState<"TODAY" | "TOMORROW" | "ALL" | "CUSTOM">("TODAY");
+  const [customDate, setCustomDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [tripTimeFilter, setTripTimeFilter] = useState<"ALL" | "MORNING" | "AFTERNOON" | "EVENING">("ALL");
 
-  const fetchReferralConfig = async () => {
-    try {
-      const res = await fetch("/api/referrals");
-      const data = await res.json();
-      if (data.success && data.config) {
-        setPointsPerPurchase(data.config.pointsPerFilleulPurchase ?? 100);
-      }
-    } catch {
-      // Ignorer
-    }
-  };
+  // Filtres avancés du Registre des Billets
+  const [ticketDateFilter, setTicketDateFilter] = useState<"ALL" | "TODAY" | "YESTERDAY" | "TOMORROW" | "CUSTOM">("ALL");
+  const [ticketCustomDate, setTicketCustomDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [ticketTimeFilter, setTicketTimeFilter] = useState<"ALL" | "MORNING" | "AFTERNOON" | "EVENING">("ALL");
+  const [ticketStatusFilter, setTicketStatusFilter] = useState<"ALL" | "NOT_BOARDED" | "BOARDED" | "DISEMBARKED">("ALL");
 
-  const handleSaveReferralConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingReferral(true);
-    setReferralSaved(false);
-    try {
-      const res = await fetch("/api/referrals", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pointsPerFilleulPurchase: pointsPerPurchase }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setReferralSaved(true);
-        setTimeout(() => setReferralSaved(false), 3000);
-      }
-    } finally {
-      setSavingReferral(false);
-    }
+  // Validation de billets (Caméra / Code / Téléphone)
+  const [validateQuery, setValidateQuery] = useState("");
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<BookingItem | null>(null);
+  const [searchResults, setSearchResults] = useState<BookingItem[]>([]);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const scannerRef = useRef<any>(null);
+
+  // Modale Nouveau Trajet (Pour Compagnie et Super Admin)
+  const [showAddTripModal, setShowAddTripModal] = useState(false);
+  const [creatingTrip, setCreatingTrip] = useState(false);
+  const [newOrigin, setNewOrigin] = useState("Cotonou");
+  const [newDestination, setNewDestination] = useState("Parakou");
+  const [newDate, setNewDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [newTime, setNewTime] = useState("07:00");
+  const [newPrice, setNewPrice] = useState(8500);
+  const [newPlate, setNewPlate] = useState("");
+  const [newTripCompanyId, setNewTripCompanyId] = useState("");
+
+  // Modale Nouvel Agent
+  const [showAddAgentModal, setShowAddAgentModal] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentPhone, setNewAgentPhone] = useState("");
+  const [newAgentEmail, setNewAgentEmail] = useState("");
+  const [newAgentRole, setNewAgentRole] = useState("STATION_MANAGER");
+
+  const notify = (type: "success" | "error" | "info", text: string) => {
+    setNotificationMsg({ type, text });
+    setTimeout(() => setNotificationMsg(null), 4000);
   };
 
   const handleLogout = async () => {
@@ -69,209 +83,375 @@ export default function ManifestListPage() {
     router.refresh();
   };
 
-  const fetchTrips = async () => {
+  // 1. Charger le profil de l'utilisateur connecté
+  const loadProfile = async () => {
+    try {
+      const res = await fetch("/api/auth/me");
+      const data = await res.json();
+      if (data.success && data.user) {
+        setUserProfile(data.user);
+        if (data.user.companyId) {
+          setSelectedCompanyId(data.user.companyId);
+        }
+      }
+    } catch {
+      // Ignorer
+    }
+  };
+
+  // 2. Charger les départs
+  const fetchTrips = async (compFilter?: string) => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch("/api/trips");
+      const url = compFilter ? `/api/trips?companyId=${compFilter}` : "/api/trips";
+      const res = await fetch(url);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
         setTrips(data.data);
-      } else {
-        setError(data.error?.message || "Impossible de charger les départs du jour.");
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur de connexion";
-      setError(msg);
+    } catch {
+      setError("Impossible de charger les départs.");
     } finally {
       setLoading(false);
     }
   };
 
+  // 3. Charger les agents de la compagnie
+  const fetchAgents = async (compFilter?: string) => {
+    try {
+      const url = compFilter ? `/api/company/agents?companyId=${compFilter}` : "/api/company/agents";
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setAgents(data.data);
+      }
+    } catch {
+      // Ignorer
+    }
+  };
+
+  // 4. Charger les réservations & billets
+  const fetchBookings = async (compFilter?: string, q?: string) => {
+    try {
+      const params = new URLSearchParams();
+      if (compFilter) params.set("companyId", compFilter);
+      if (q) params.set("q", q);
+      const res = await fetch(`/api/bookings?${params.toString()}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setBookings(data.data);
+      }
+    } catch {
+      // Ignorer
+    }
+  };
+
+  // 5. Charger la liste des compagnies (pour Super Admin)
+  const fetchCompanies = async () => {
+    try {
+      const res = await fetch("/api/admin/companies");
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setCompanies(data.data);
+      }
+    } catch {
+      // Ignorer
+    }
+  };
+
   useEffect(() => {
+    loadProfile();
     fetchTrips();
-    fetchReferralConfig();
+    fetchAgents();
+    fetchBookings();
+    fetchCompanies();
   }, []);
 
+  const handleCompanyChange = (compId: string) => {
+    setSelectedCompanyId(compId);
+    fetchTrips(compId);
+    fetchAgents(compId);
+    fetchBookings(compId);
+  };
+
+  // 6. GESTION DU SCANNER CAMÉRA QR CODE
+  const startCameraScanner = async () => {
+    try {
+      setIsCameraActive(true);
+      setValidationResult(null);
+      const { Html5Qrcode } = await import("html5-qrcode");
+
+      if (scannerRef.current) {
+        try {
+          await scannerRef.current.stop();
+        } catch {
+          // Ignorer
+        }
+      }
+
+      const html5QrCode = new Html5Qrcode("qr-reader");
+      scannerRef.current = html5QrCode;
+
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        async (decodedText) => {
+          handleValidateTicket(decodedText, "CONFIRM_BOARDING");
+          try {
+            await html5QrCode.stop();
+            setIsCameraActive(false);
+          } catch {
+            // Ignorer
+          }
+        },
+        () => {}
+      );
+    } catch (err: unknown) {
+      setIsCameraActive(false);
+      const msg = err instanceof Error ? err.message : "Impossible d'accéder à la caméra.";
+      notify("error", `Erreur caméra : ${msg}. Assurez-vous d'avoir accordé les permissions.`);
+    }
+  };
+
+  const stopCameraScanner = async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+      } catch {
+        // Ignorer
+      }
+    }
+    setIsCameraActive(false);
+  };
+
+  // 7. VÉRIFICATION OU VALIDATION DU BILLET
+  const handleValidateTicket = async (queryInput?: string, action: "VERIFY" | "CONFIRM_BOARDING" = "VERIFY") => {
+    const q = (queryInput || validateQuery).trim();
+    if (!q) {
+      notify("error", "Veuillez entrer un code court (ex: KWR-9X2) ou un numéro de téléphone.");
+      return;
+    }
+
+    setValidating(true);
+    setValidationResult(null);
+    setSearchResults([]);
+
+    try {
+      const res = await fetch("/api/bookings/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          searchQuery: q,
+          action,
+        }),
+      });
+
+      const json = await res.json();
+      if (res.ok && json.success) {
+        if (action === "CONFIRM_BOARDING") {
+          setValidationResult(json.data);
+          notify("success", json.message || "Embarquement validé avec succès !");
+          fetchTrips(selectedCompanyId);
+          fetchBookings(selectedCompanyId);
+        } else {
+          if (Array.isArray(json.data)) {
+            setSearchResults(json.data);
+            if (json.data.length === 1) {
+              setValidationResult(json.data[0]);
+            }
+          }
+        }
+      } else {
+        notify("error", json.error || "Billet introuvable pour cette recherche.");
+      }
+    } catch {
+      notify("error", "Erreur réseau lors de la validation du billet.");
+    } finally {
+      setValidating(false);
+    }
+  };
+
+  // 8. CRÉER UN DÉPART (TRAJET)
+  const handleCreateTrip = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreatingTrip(true);
+
+    try {
+      const res = await fetch("/api/trips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          originCity: newOrigin,
+          destinationCity: newDestination,
+          departureDate: newDate,
+          departureTime: newTime,
+          priceFcfa: Number(newPrice),
+          busPlateNumber: newPlate.trim() || undefined,
+          targetCompanyId: userProfile?.role === "SUPER_ADMIN" ? (newTripCompanyId || selectedCompanyId) : undefined,
+        }),
+      });
+
+      const json = await res.json();
+      if (res.ok && json.success) {
+        notify("success", json.message || "Départ programmé avec succès !");
+        setShowAddTripModal(false);
+        setNewPlate("");
+        fetchTrips(selectedCompanyId);
+      } else {
+        notify("error", json.error || "Échec de programmation du trajet.");
+      }
+    } catch {
+      notify("error", "Erreur réseau.");
+    } finally {
+      setCreatingTrip(false);
+    }
+  };
+
+  // 9. CRÉER UN AGENT DE GARE
+  const handleCreateAgent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreatingAgent(true);
+
+    try {
+      const res = await fetch("/api/company/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fullName: newAgentName,
+          phone: newAgentPhone.trim() || undefined,
+          email: newAgentEmail.trim() || undefined,
+          role: newAgentRole,
+          targetCompanyId: userProfile?.role === "SUPER_ADMIN" ? selectedCompanyId : undefined,
+        }),
+      });
+
+      const json = await res.json();
+      if (res.ok && json.success) {
+        notify("success", json.message || "Agent créé avec succès !");
+        setShowAddAgentModal(false);
+        setNewAgentName("");
+        setNewAgentPhone("");
+        setNewAgentEmail("");
+        fetchAgents(selectedCompanyId);
+      } else {
+        notify("error", json.error || "Impossible d'enregistrer l'agent.");
+      }
+    } catch {
+      notify("error", "Erreur réseau.");
+    } finally {
+      setCreatingAgent(false);
+    }
+  };
+
+  const filteredTrips = useMemo(
+    () => filterTrips(trips, tripSearch, dateFilter, customDate, tripTimeFilter),
+    [trips, tripSearch, dateFilter, customDate, tripTimeFilter]
+  );
+
+  const filteredBookings = useMemo(
+    () => filterBookings(bookings, ticketSearch, ticketDateFilter, ticketCustomDate, ticketTimeFilter, ticketStatusFilter),
+    [bookings, ticketSearch, ticketDateFilter, ticketCustomDate, ticketTimeFilter, ticketStatusFilter]
+  );
+
+  const totalSeatsSold = trips.reduce((acc, t) => acc + (t.soldSeats || 0), 0);
+  const totalCapacity = trips.reduce((acc, t) => acc + (t.totalQuota || 50), 0);
+  const globalOccupancy = totalCapacity > 0 ? Math.round((totalSeatsSold / totalCapacity) * 100) : 0;
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      <header className="border-b border-slate-800 bg-slate-900/90 sticky top-0 z-40 px-4 sm:px-8 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link href="/" className="h-10 w-10 rounded-xl bg-orange-600 flex items-center justify-center text-white">
-              <Bus className="h-5 w-5" />
-            </Link>
-            <div>
-              <h1 className="text-lg font-bold text-white flex items-center gap-2">
-                Espace Chef de Gare
-                <span className="text-xs font-semibold bg-orange-500/10 text-orange-400 border border-orange-500/30 px-2 py-0.5 rounded-full">
-                  Manifestes
-                </span>
-              </h1>
-              <p className="text-xs text-slate-400">Sélectionnez le bus pour gérer les 50 sièges et ventes guichet</p>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[#F4F6F9] text-slate-900 flex font-sans antialiased selection:bg-[#FF6500]/20 selection:text-[#FF6500]">
+      {/* 1. MENU LATÉRAL GAUCHE PROFESSIONNEL */}
+      <PortalSidebar
+        userProfile={userProfile} activeTab={activeTab} setActiveTab={setActiveTab}
+        stopCameraScanner={stopCameraScanner} trips={trips} bookings={bookings} agents={agents}
+        setShowAddTripModal={setShowAddTripModal} handleLogout={handleLogout}
+      />
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={fetchTrips}
-              className="flex items-center gap-2 text-xs font-semibold px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-              Actualiser
-            </button>
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-red-950/60 hover:bg-red-900/80 text-red-300 border border-red-800/50 transition cursor-pointer"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-              Déconnexion
-            </button>
-          </div>
-        </div>
-      </header>
+      {/* 2. ZONE PRINCIPALE À DROITE */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <PortalHeader
+          validateQuery={validateQuery} setValidateQuery={setValidateQuery} handleValidateTicket={handleValidateTicket}
+          userProfile={userProfile} companies={companies} selectedCompanyId={selectedCompanyId}
+          handleCompanyChange={handleCompanyChange} setShowAddTripModal={setShowAddTripModal}
+          fetchTrips={fetchTrips} fetchAgents={fetchAgents} fetchBookings={fetchBookings} loading={loading}
+          activeTab={activeTab} setActiveTab={setActiveTab} stopCameraScanner={stopCameraScanner}
+        />
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-8 py-8 flex-1 w-full">
-        {/* Panneau Admin : Configuration des points de parrainage par achat de filleul */}
-        <div className="mb-8 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-start gap-3.5">
-            <div className="h-10 w-10 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
-              <Gift className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-white">
-                Programme de Parrainage (Lien d&apos;inscription)
-              </h3>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Chaque client partage son lien d&apos;inscription. Configurez le nombre de points que le parrain gagne automatiquement à chaque achat de billet de son filleul.
-              </p>
-            </div>
-          </div>
-
-          <form onSubmit={handleSaveReferralConfig} className="flex items-center gap-2.5 shrink-0">
-            <div className="flex items-center bg-slate-950 border border-slate-800 rounded-xl px-3 py-2">
-              <input
-                type="number"
-                min={0}
-                max={100000}
-                value={pointsPerPurchase}
-                onChange={(e) => setPointsPerPurchase(Number(e.target.value))}
-                className="w-20 bg-transparent text-sm font-black text-amber-400 focus:outline-none text-right pr-2"
-              />
-              <span className="text-xs font-bold text-slate-400">pts / achat filleul</span>
-            </div>
-            <button
-              type="submit"
-              disabled={savingReferral}
-              className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition flex items-center gap-1.5 cursor-pointer"
-            >
-              {referralSaved ? (
-                <>
-                  <Check className="h-3.5 w-3.5" />
-                  Enregistré
-                </>
-              ) : (
-                <span>{savingReferral ? "..." : "Appliquer"}</span>
-              )}
-            </button>
-          </form>
-        </div>
-
-        <div className="mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-white">Départs programmés</h2>
-            <p className="text-sm text-slate-400">Tous les bus actifs de vos compagnies partenaires</p>
-          </div>
-        </div>
-
-        {error && (
-          <div className="mb-6 p-4 rounded-xl bg-red-950/50 border border-red-800 text-red-200 text-sm flex items-center gap-3">
-            <AlertCircle className="h-5 w-5 text-red-400 shrink-0" />
-            <span>{error}</span>
-          </div>
+        {/* FEEDBACK TOAST / BANNER */}
+        {notificationMsg && (
+          <NotificationBanner notificationMsg={notificationMsg} setNotificationMsg={setNotificationMsg} />
         )}
 
-        {loading ? (
-          <div className="py-20 text-center text-slate-500">
-            <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-3 text-orange-500" />
-            <p className="text-sm">Chargement des départs réels...</p>
-          </div>
-        ) : trips.length === 0 ? (
-          <div className="py-20 text-center bg-slate-900/40 border border-slate-800 rounded-2xl p-8">
-            <Bus className="h-12 w-12 mx-auto text-slate-600 mb-4" />
-            <h3 className="text-base font-bold text-white mb-1">Aucun départ actif trouvé</h3>
-            <p className="text-sm text-slate-400 max-w-md mx-auto mb-6">
-              Assurez-vous que la base de données est initialisée avec vos trajets.
-            </p>
-            <button
-              onClick={fetchTrips}
-              className="bg-orange-500 hover:bg-orange-600 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
-            >
-              Recharger
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {trips.map((trip) => (
-              <div
-                key={trip._id}
-                className="bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-5 flex flex-col justify-between transition group shadow-lg"
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-slate-800 text-orange-400 border border-slate-700">
-                      {trip.tripCode}
-                    </span>
-                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-400 border border-emerald-800">
-                      {trip.status}
-                    </span>
-                  </div>
+        {/* MAIN BODY PER TAB */}
+        <main className="p-4 sm:p-8 space-y-7 flex-1">
+          {/* BANDEAU KPIS D'EXPLOITATION */}
+          <KpiBanner
+            trips={trips} totalSeatsSold={totalSeatsSold} totalCapacity={totalCapacity}
+            globalOccupancy={globalOccupancy} bookings={bookings} agents={agents}
+          />
 
-                  <h3 className="text-base font-bold text-white mb-1">{trip.companyName}</h3>
-                  {trip.busPlateNumber && (
-                    <p className="text-xs text-slate-400 mb-3 font-mono">Bus : {trip.busPlateNumber}</p>
-                  )}
+          {/* ONGLET 1 : CENTRE DE CONTRÔLE & VALIDATION MULTI-MODALE */}
+          {activeTab === "VALIDATOR" && (
+            <ValidatorTab
+              validationMode={validationMode} setValidationMode={setValidationMode}
+              startCameraScanner={startCameraScanner} stopCameraScanner={stopCameraScanner}
+              isCameraActive={isCameraActive} validateQuery={validateQuery} setValidateQuery={setValidateQuery}
+              handleValidateTicket={handleValidateTicket} validating={validating}
+              validationResult={validationResult} searchResults={searchResults}
+            />
+          )}
 
-                  <div className="space-y-2 py-3 border-y border-slate-800 text-xs text-slate-300">
-                    <div className="flex items-center gap-2">
-                      <MapPin className="h-3.5 w-3.5 text-orange-400 shrink-0" />
-                      <span className="font-semibold text-white">{trip.originCity}</span>
-                      <ArrowRight className="h-3 w-3 text-slate-500" />
-                      <span className="font-semibold text-white">{trip.destinationCity}</span>
-                    </div>
+          {/* ONGLET 2 : DÉPARTS & FICHES DE CHARGEMENT */}
+          {activeTab === "TRIPS" && (
+            <TripsTab
+              dateFilter={dateFilter} setDateFilter={setDateFilter} customDate={customDate} setCustomDate={setCustomDate}
+              tripTimeFilter={tripTimeFilter} setTripTimeFilter={setTripTimeFilter}
+              tripSearch={tripSearch} setTripSearch={setTripSearch} loading={loading} filteredTrips={filteredTrips}
+              userProfile={userProfile} setShowAddTripModal={setShowAddTripModal}
+            />
+          )}
 
-                    <div className="flex items-center gap-2">
-                      <Clock className="h-3.5 w-3.5 text-orange-400 shrink-0" />
-                      <span>
-                        Départ : <strong>{trip.departureTime}</strong> ({trip.departureDate})
-                      </span>
-                    </div>
+          {/* ONGLET 3 : SUPERVISION & REGISTRE DES BILLETS */}
+          {activeTab === "TICKETS" && (
+            <TicketsTab
+              ticketSearch={ticketSearch} setTicketSearch={setTicketSearch}
+              ticketDateFilter={ticketDateFilter} setTicketDateFilter={setTicketDateFilter}
+              ticketCustomDate={ticketCustomDate} setTicketCustomDate={setTicketCustomDate}
+              ticketTimeFilter={ticketTimeFilter} setTicketTimeFilter={setTicketTimeFilter}
+              ticketStatusFilter={ticketStatusFilter} setTicketStatusFilter={setTicketStatusFilter}
+              bookings={bookings} filteredBookings={filteredBookings} handleValidateTicket={handleValidateTicket}
+            />
+          )}
 
-                    <div className="flex items-center gap-2">
-                      <Users className="h-3.5 w-3.5 text-orange-400 shrink-0" />
-                      <span>
-                        Places Kaweru : <strong>{trip.availableSeats} disponibles</strong> / {trip.totalQuota} (
-                        {trip.soldSeats} vendues)
-                      </span>
-                    </div>
-                  </div>
-                </div>
+          {/* ONGLET 4 : PERSONNEL & ÉQUIPE DE GARE */}
+          {activeTab === "AGENTS" && (userProfile?.role === "COMPANY_ADMIN" || userProfile?.role === "SUPER_ADMIN") && (
+            <AgentsTab setShowAddAgentModal={setShowAddAgentModal} agents={agents} />
+          )}
+        </main>
+      </div>
 
-                <div className="mt-5">
-                  <Link
-                    href={`/manifest/${trip._id}`}
-                    className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white font-semibold py-2.5 px-4 rounded-xl text-sm transition shadow-md shadow-orange-500/20"
-                  >
-                    Ouvrir le Manifeste
-                    <ArrowRight className="h-4 w-4 group-hover:translate-x-0.5 transition" />
-                  </Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </main>
+      {/* MODALE PROGRAMMER UN DÉPART (TRAJET) */}
+      {showAddTripModal && (
+        <AddTripModal
+          setShowAddTripModal={setShowAddTripModal} handleCreateTrip={handleCreateTrip}
+          userProfile={userProfile} companies={companies} selectedCompanyId={selectedCompanyId}
+          newTripCompanyId={newTripCompanyId} setNewTripCompanyId={setNewTripCompanyId}
+          newOrigin={newOrigin} setNewOrigin={setNewOrigin} newDestination={newDestination} setNewDestination={setNewDestination}
+          newDate={newDate} setNewDate={setNewDate} newTime={newTime} setNewTime={setNewTime}
+          newPrice={newPrice} setNewPrice={setNewPrice} newPlate={newPlate} setNewPlate={setNewPlate}
+          creatingTrip={creatingTrip}
+        />
+      )}
+
+      {/* MODALE CRÉER UN AGENT */}
+      {showAddAgentModal && (
+        <AddAgentModal
+          setShowAddAgentModal={setShowAddAgentModal} handleCreateAgent={handleCreateAgent}
+          newAgentName={newAgentName} setNewAgentName={setNewAgentName} newAgentRole={newAgentRole}
+          setNewAgentRole={setNewAgentRole} newAgentPhone={newAgentPhone} setNewAgentPhone={setNewAgentPhone}
+          newAgentEmail={newAgentEmail} setNewAgentEmail={setNewAgentEmail} creatingAgent={creatingAgent}
+        />
+      )}
     </div>
   );
 }
-

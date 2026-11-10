@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { connectToDatabase } from "@/lib/mongodb";
+import { isValidObjectId } from "mongoose";
+import { requireSession, authorizeRoles, assertCompanyAccess } from "@/lib/auth";
 import { Booking } from "@/models/Booking";
 import { Trip } from "@/models/Trip";
 import { handleApiError, AppError } from "@/lib/errors";
@@ -9,8 +10,11 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectToDatabase();
+    const session = await requireSession(req);
     const { id } = await params;
+    if (!isValidObjectId(id)) {
+      throw new AppError("Réservation introuvable.", "NOT_FOUND", 404);
+    }
     const body = await req.json();
 
     const { newTripId } = body;
@@ -24,6 +28,18 @@ export async function POST(
       throw new AppError("Réservation introuvable.", "NOT_FOUND", 404);
     }
 
+    // Autorisé : le passager titulaire du billet, ou le personnel de la compagnie concernée.
+    const isOwner =
+      booking.userId === session.uid || (Boolean(session.phone) && booking.passengerPhone === session.phone);
+    if (!isOwner) {
+      authorizeRoles(session.role, ["SUPER_ADMIN", "COMPANY_ADMIN", "STATION_MANAGER", "TICKET_AGENT"]);
+      assertCompanyAccess(session, booking.companyId);
+    }
+
+    if (booking.boardingStatus !== "NOT_BOARDED") {
+      throw new AppError("Un billet déjà embarqué ne peut pas être reporté.", "VALIDATION_ERROR", 400);
+    }
+
     if (booking.status !== "CONFIRMED" && booking.status !== "MISSED") {
       throw new AppError(
         `Impossible de reporter un billet au statut "${booking.status}". Seuls les billets confirmés ou manqués sont éligibles.`,
@@ -33,7 +49,7 @@ export async function POST(
     }
 
     const originalTrip = await Trip.findById(booking.tripId);
-    const newTrip = await Trip.findById(newTripId);
+    const newTrip = isValidObjectId(newTripId) ? await Trip.findById(newTripId) : null;
 
     if (!newTrip) {
       throw new AppError("Nouveau voyage introuvable.", "NOT_FOUND", 404);
@@ -48,11 +64,17 @@ export async function POST(
       );
     }
 
+    if (newTrip._id.equals(booking.tripId)) {
+      throw new AppError("Le billet est déjà sur ce départ.", "VALIDATION_ERROR", 400);
+    }
+
+    const seatCount = Math.max(1, booking.seatsCount || 1);
+
     // Vérification de la disponibilité sur le nouveau bus
     const now = new Date();
     const newTripCutoff = new Date(newTrip.departureDateTime.getTime() - newTrip.cutoffMinutes * 60 * 1000);
 
-    if (now >= newTripCutoff || newTrip.status !== "OPEN" || newTrip.availableSeats < 1) {
+    if (now >= newTripCutoff || newTrip.status !== "OPEN" || newTrip.availableSeats < seatCount) {
       throw new AppError(
         "Ce nouveau départ n'a plus de places disponibles ou les ventes sont clôturées.",
         "OVERBOOKING_ERROR",
@@ -86,8 +108,8 @@ export async function POST(
 
     // 1. Verrouillage atomique sur le nouveau voyage
     const updatedNewTrip = await Trip.findOneAndUpdate(
-      { _id: newTrip._id, status: "OPEN", availableSeats: { $gte: 1 } },
-      { $inc: { availableSeats: -1, soldSeats: 1 } },
+      { _id: newTrip._id, status: "OPEN", availableSeats: { $gte: seatCount } },
+      { $inc: { availableSeats: -seatCount, soldSeats: seatCount } },
       { returnDocument: "after" }
     );
 
@@ -98,7 +120,7 @@ export async function POST(
     // 2. Libération du siège sur l'ancien voyage (s'il n'est pas encore parti)
     if (originalTrip && originalCutoff && now < originalCutoff) {
       await Trip.findByIdAndUpdate(originalTrip._id, {
-        $inc: { availableSeats: 1, soldSeats: -1 },
+        $inc: { availableSeats: seatCount, soldSeats: -seatCount },
       });
     }
 

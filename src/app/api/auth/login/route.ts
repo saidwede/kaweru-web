@@ -1,30 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
 import { normalizePhoneNumber } from "@/lib/config";
 import { connectToDatabase } from "@/lib/mongodb";
+import { consumeOtp } from "@/lib/otp";
+import { applySessionCookie, signSession } from "@/lib/session";
+import { verifyGoogleIdToken } from "@/lib/auth";
+import { AppError } from "@/lib/errors";
 import { User, UserRole } from "@/models/User";
-import { Otp } from "@/models/Otp";
-
-const OTP_SECRET = process.env.QR_SECRET_KEY || "kaweru_otp_hmac_secret_2026";
-
-function verifyOtpChallenge(
-  challengeToken: string | undefined,
-  identifier: string,
-  code: string
-): boolean {
-  if (!challengeToken) return false;
-  try {
-    const decoded = JSON.parse(Buffer.from(challengeToken, "base64").toString("utf-8"));
-    if (decoded.identifier !== identifier) return false;
-    if (Date.now() > Number(decoded.expiresAtMs)) return false;
-
-    const payload = `${identifier}:${code}:${decoded.expiresAtMs}`;
-    const expectedSig = crypto.createHmac("sha256", OTP_SECRET).update(payload).digest("hex");
-    return expectedSig === decoded.sig;
-  } catch {
-    return false;
-  }
-}
 
 function getSuperAdminEmails(): Set<string> {
   const envEmails = process.env.SUPER_ADMIN_EMAILS || "";
@@ -35,15 +16,6 @@ function getSuperAdminEmails(): Set<string> {
   return new Set(list);
 }
 
-function deduceRoleFromEmail(email: string): { role: UserRole; companyName: string } {
-  const lower = email.trim().toLowerCase();
-  const superAdmins = getSuperAdminEmails();
-  if (superAdmins.has(lower)) {
-    return { role: "SUPER_ADMIN", companyName: "Direction Kaweru" };
-  }
-  return { role: "PASSENGER", companyName: "Kaweru" };
-}
-
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204 });
 }
@@ -51,7 +23,7 @@ export async function OPTIONS() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { loginMethod, phone, email, otp, challengeToken, name, googleUid, referredBy } = body;
+    const { loginMethod, phone, email, otp, name, idToken, referredBy } = body;
     const cleanRef = referredBy ? String(referredBy).trim().toUpperCase() : null;
 
     let userRole: UserRole = "PASSENGER";
@@ -63,9 +35,10 @@ export async function POST(req: NextRequest) {
     let userPhone: string | undefined;
     let userEmail: string | undefined;
     let userUid = `usr_${Date.now()}`;
+    let userCompanyId: string | null = null;
     let referralCode = `KWR${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
     let referralPoints = 0;
-    let companyName = "Kaweru";
+    const companyName = "Kaweru";
 
     await connectToDatabase();
 
@@ -89,35 +62,29 @@ export async function POST(req: NextRequest) {
 
       userPhone = normalizePhoneNumber(String(phone));
 
-      const otpRecord = await Otp.findOne({
-        identifier: userPhone,
-        method: "PHONE",
-        code: cleanOtp,
-        expiresAt: { $gt: new Date() },
-      });
-
-      const isHmacValid = verifyOtpChallenge(challengeToken, userPhone, cleanOtp);
-
-      if (!otpRecord && !isHmacValid) {
+      if (!(await consumeOtp(userPhone, "PHONE", cleanOtp))) {
         return NextResponse.json(
           { success: false, error: "Code OTP invalide ou expiré. Veuillez demander un nouveau code." },
           { status: 401 }
         );
       }
 
-      if (otpRecord) {
-        await Otp.deleteOne({ _id: otpRecord._id });
-      }
-
       userName = `Voyageur ${userPhone.slice(-4)}`;
 
       const existingUser = await User.findOne({ phone: userPhone });
       if (existingUser) {
+        if (!existingUser.isActive) {
+          return NextResponse.json(
+            { success: false, error: "Votre compte a été désactivé par l'administrateur." },
+            { status: 403 }
+          );
+        }
         userRole = existingUser.role;
         userName = existingUser.fullName;
         firstName = existingUser.firstName || "";
         lastName = existingUser.lastName || "";
         residenceCity = existingUser.residenceCity || "";
+        userCompanyId = existingUser.companyId ? existingUser.companyId.toString() : null;
         referralCode = existingUser.referralCode || referralCode;
         referralPoints = existingUser.referralPoints || 0;
         isProfileCompleted = Boolean(
@@ -130,15 +97,19 @@ export async function POST(req: NextRequest) {
         userUid = existingUser.firebaseUid || existingUser._id.toString();
       } else {
         try {
-          const validSponsor = cleanRef ? await User.findOne({ referralCode: cleanRef }) : null;
+          const validSponsor = cleanRef
+            ? await User.findOne({
+                $or: [{ referralCode: cleanRef }, { firebaseUid: cleanRef }, { _id: cleanRef.length === 24 ? cleanRef : undefined }],
+              })
+            : null;
           const newUser = await User.create({
             firebaseUid: userUid,
             phone: userPhone,
             fullName: userName,
             isProfileCompleted: false,
             role: "PASSENGER",
-            referralCode,
-            referredBy: validSponsor ? cleanRef : null,
+            referralCode: userUid,
+            referredBy: validSponsor ? (validSponsor.firebaseUid || validSponsor._id.toString()) : null,
             referralPoints: 0,
             referralsCount: 0,
             walletCreditsFcfa: 0,
@@ -176,33 +147,23 @@ export async function POST(req: NextRequest) {
       const cleanEmail = String(email).trim().toLowerCase();
       userEmail = cleanEmail;
 
-      const otpRecord = await Otp.findOne({
-        identifier: cleanEmail,
-        method: "EMAIL",
-        code: cleanOtp,
-        expiresAt: { $gt: new Date() },
-      });
-
-      const isHmacValid = verifyOtpChallenge(challengeToken, cleanEmail, cleanOtp);
-
-      if (!otpRecord && !isHmacValid) {
+      if (!(await consumeOtp(cleanEmail, "EMAIL", cleanOtp))) {
         return NextResponse.json(
           { success: false, error: "Code OTP invalide ou expiré. Vérifiez votre boîte mail." },
           { status: 401 }
         );
       }
 
-      if (otpRecord) {
-        await Otp.deleteOne({ _id: otpRecord._id });
-      }
-
-      const deduced = deduceRoleFromEmail(cleanEmail);
-      userRole = deduced.role;
-      companyName = deduced.companyName;
       userName = cleanEmail.split("@")[0];
 
       const existingUser = await User.findOne({ email: cleanEmail });
       if (existingUser) {
+        if (!existingUser.isActive) {
+          return NextResponse.json(
+            { success: false, error: "Votre compte a été désactivé par l'administrateur." },
+            { status: 403 }
+          );
+        }
         const superAdmins = getSuperAdminEmails();
         if (superAdmins.has(cleanEmail) && existingUser.role !== "SUPER_ADMIN") {
           existingUser.role = "SUPER_ADMIN";
@@ -213,6 +174,7 @@ export async function POST(req: NextRequest) {
         firstName = existingUser.firstName || "";
         lastName = existingUser.lastName || "";
         residenceCity = existingUser.residenceCity || "";
+        userCompanyId = existingUser.companyId ? existingUser.companyId.toString() : null;
         referralCode = existingUser.referralCode || referralCode;
         referralPoints = existingUser.referralPoints || 0;
         const hasRealPhone = Boolean(
@@ -227,7 +189,13 @@ export async function POST(req: NextRequest) {
         userUid = existingUser.firebaseUid || existingUser._id.toString();
       } else {
         try {
-          const validSponsor = cleanRef ? await User.findOne({ referralCode: cleanRef }) : null;
+          const superAdmins = getSuperAdminEmails();
+          const initialRole: UserRole = superAdmins.has(cleanEmail) ? "SUPER_ADMIN" : "PASSENGER";
+          const validSponsor = cleanRef
+            ? await User.findOne({
+                $or: [{ referralCode: cleanRef }, { firebaseUid: cleanRef }, { _id: cleanRef.length === 24 ? cleanRef : undefined }],
+              })
+            : null;
           const placeholderPhone = `email_${cleanEmail}`;
           const newUser = await User.create({
             firebaseUid: userUid,
@@ -235,9 +203,9 @@ export async function POST(req: NextRequest) {
             email: cleanEmail,
             fullName: userName,
             isProfileCompleted: false,
-            role: userRole,
-            referralCode,
-            referredBy: validSponsor ? cleanRef : null,
+            role: initialRole,
+            referralCode: userUid,
+            referredBy: validSponsor ? (validSponsor.firebaseUid || validSponsor._id.toString()) : null,
             referralPoints: 0,
             referralsCount: 0,
             walletCreditsFcfa: 0,
@@ -246,6 +214,7 @@ export async function POST(req: NextRequest) {
           if (validSponsor) {
             await User.updateOne({ _id: validSponsor._id }, { $inc: { referralsCount: 1 } });
           }
+          userRole = initialRole;
           userUid = newUser.firebaseUid;
           referralCode = newUser.referralCode;
         } catch {
@@ -258,32 +227,44 @@ export async function POST(req: NextRequest) {
     // 3. CONNEXION AVEC GOOGLE (OAUTH 1-CLIC)
     // =========================================================================
     else if (loginMethod === "GOOGLE") {
-      if (!email) {
+      if (!idToken) {
         return NextResponse.json(
-          { success: false, error: "Compte Google sans adresse e-mail valide." },
+          { success: false, error: "Jeton Google manquant. Veuillez mettre à jour l'application." },
           { status: 400 }
         );
       }
 
-      const cleanEmail = String(email).trim().toLowerCase();
+      // L'identité (email, uid) provient UNIQUEMENT du jeton vérifié par Firebase, jamais du corps de la requête.
+      let google;
+      try {
+        google = await verifyGoogleIdToken(String(idToken));
+      } catch (err) {
+        const message = err instanceof AppError ? err.message : "Jeton Google invalide.";
+        return NextResponse.json({ success: false, error: message }, { status: 401 });
+      }
+
+      const cleanEmail = google.email;
+      const displayName = String(google.name || name || "").trim();
       userEmail = cleanEmail;
-      userName = name ? String(name).trim() : cleanEmail.split("@")[0];
-      if (name && String(name).trim().includes(" ")) {
-        const parts = String(name).trim().split(" ");
+      userName = displayName || cleanEmail.split("@")[0];
+      if (displayName.includes(" ")) {
+        const parts = displayName.split(" ");
         firstName = parts[0];
         lastName = parts.slice(1).join(" ");
       }
-      userUid = googleUid ? String(googleUid) : `ggl_${Date.now()}`;
-
-      const deduced = deduceRoleFromEmail(cleanEmail);
-      userRole = deduced.role;
-      companyName = deduced.companyName;
+      userUid = google.uid;
 
       const existingUser = await User.findOne({
         $or: [{ email: cleanEmail }, { firebaseUid: userUid }],
       });
 
       if (existingUser) {
+        if (!existingUser.isActive) {
+          return NextResponse.json(
+            { success: false, error: "Votre compte a été désactivé par l'administrateur." },
+            { status: 403 }
+          );
+        }
         const superAdmins = getSuperAdminEmails();
         if (superAdmins.has(cleanEmail) && existingUser.role !== "SUPER_ADMIN") {
           existingUser.role = "SUPER_ADMIN";
@@ -294,6 +275,7 @@ export async function POST(req: NextRequest) {
         firstName = existingUser.firstName || firstName;
         lastName = existingUser.lastName || lastName;
         residenceCity = existingUser.residenceCity || "";
+        userCompanyId = existingUser.companyId ? existingUser.companyId.toString() : null;
         referralCode = existingUser.referralCode || referralCode;
         referralPoints = existingUser.referralPoints || 0;
         const hasRealPhone = Boolean(
@@ -308,7 +290,13 @@ export async function POST(req: NextRequest) {
         userUid = existingUser.firebaseUid || existingUser._id.toString();
       } else {
         try {
-          const validSponsor = cleanRef ? await User.findOne({ referralCode: cleanRef }) : null;
+          const superAdmins = getSuperAdminEmails();
+          const initialRole: UserRole = superAdmins.has(cleanEmail) ? "SUPER_ADMIN" : "PASSENGER";
+          const validSponsor = cleanRef
+            ? await User.findOne({
+                $or: [{ referralCode: cleanRef }, { firebaseUid: cleanRef }, { _id: cleanRef.length === 24 ? cleanRef : undefined }],
+              })
+            : null;
           const newUser = await User.create({
             firebaseUid: userUid,
             phone: `google_${userUid}`,
@@ -317,9 +305,9 @@ export async function POST(req: NextRequest) {
             lastName,
             fullName: userName,
             isProfileCompleted: false,
-            role: userRole,
-            referralCode,
-            referredBy: validSponsor ? cleanRef : null,
+            role: initialRole,
+            referralCode: userUid,
+            referredBy: validSponsor ? (validSponsor.firebaseUid || validSponsor._id.toString()) : null,
             referralPoints: 0,
             referralsCount: 0,
             walletCreditsFcfa: 0,
@@ -328,6 +316,7 @@ export async function POST(req: NextRequest) {
           if (validSponsor) {
             await User.updateOne({ _id: validSponsor._id }, { $inc: { referralsCount: 1 } });
           }
+          userRole = initialRole;
           userUid = newUser.firebaseUid;
           referralCode = newUser.referralCode;
         } catch {
@@ -342,10 +331,11 @@ export async function POST(req: NextRequest) {
     }
 
     let redirectUrl = "/";
-    if (
+    if (userRole === "SUPER_ADMIN") {
+      redirectUrl = "/admin";
+    } else if (
       userRole === "STATION_MANAGER" ||
-      userRole === "COMPANY_ADMIN" ||
-      userRole === "SUPER_ADMIN"
+      userRole === "COMPANY_ADMIN"
     ) {
       redirectUrl = "/manifest";
     } else if (userRole === "ONBOARD_CONDUCTOR") {
@@ -355,6 +345,7 @@ export async function POST(req: NextRequest) {
     const sessionData = {
       uid: userUid,
       role: userRole,
+      companyId: userCompanyId,
       phone: userPhone,
       email: userEmail,
       firstName,
@@ -367,27 +358,19 @@ export async function POST(req: NextRequest) {
       companyName,
     };
 
-    const encodedSession = Buffer.from(JSON.stringify(sessionData)).toString("base64");
-
+    // Le mobile (Flutter) stocke le jeton signé et l'envoie en Authorization: Bearer
+    const token = signSession(sessionData);
     const response = NextResponse.json({
       success: true,
-      token: encodedSession,
+      token,
       user: sessionData,
       needsProfileCompletion: !isProfileCompleted,
       redirectUrl,
     });
-
-    response.cookies.set("kaweru_session", encodedSession, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
-
+    applySessionCookie(response, token);
     return response;
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Erreur de connexion";
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    console.error("[auth/login]", error);
+    return NextResponse.json({ success: false, error: "Erreur de connexion" }, { status: 500 });
   }
 }

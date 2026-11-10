@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/mongodb";
 import { Trip } from "@/models/Trip";
 import { handleApiError, AppError } from "@/lib/errors";
-import { authenticateRequest, authorizeRoles } from "@/lib/auth";
+import { authenticateRequest, authorizeRoles, assertCompanyAccess } from "@/lib/auth";
 
 export async function POST(
   req: NextRequest,
@@ -27,6 +27,7 @@ export async function POST(
     if (!trip) {
       throw new AppError("Voyage introuvable.", "NOT_FOUND", 404);
     }
+    assertCompanyAccess(user, trip.companyId);
 
     // Recherche de l'index du siège dans le plan existant
     const existingIndex = trip.seats.findIndex((s) => s.seatNumber === seatNumber);

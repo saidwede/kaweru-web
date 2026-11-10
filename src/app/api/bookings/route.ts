@@ -1,19 +1,73 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isValidObjectId } from "mongoose";
+import { getAuthSession, STAFF_ROLES } from "@/lib/auth";
 import { connectToDatabase } from "@/lib/mongodb";
 import { Trip } from "@/models/Trip";
 import { Company } from "@/models/Company";
-import { Booking, IBooking } from "@/models/Booking";
+import { Booking } from "@/models/Booking";
 import { Coupon } from "@/models/Coupon";
-import { User } from "@/models/User";
-import { ReferralConfig } from "@/models/ReferralConfig";
 import { AppError, handleApiError } from "@/lib/errors";
 import { normalizePhoneNumber } from "@/lib/config";
-import { generateShortCode, generateQrSignature } from "@/lib/security";
+import { generateShortCode, generateQrSignature, escapeRegex } from "@/lib/security";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { releaseExpiredBookings } from "@/lib/bookingLifecycle";
+
+const PAYMENT_LOCK_MS = 7 * 60 * 1000; // 7 minutes
+const MAX_SEATS_PER_BOOKING = 50; // aligné sur l'interface (réservations de groupe)
+
+export async function GET(req: NextRequest) {
+  try {
+    const session = await getAuthSession(req);
+    if (!session) {
+      return NextResponse.json({ success: false, error: "Non authentifié" }, { status: 401 });
+    }
+    if (!STAFF_ROLES.includes(session.role)) {
+      return NextResponse.json({ success: false, error: "Accès réservé au personnel et aux administrateurs." }, { status: 403 });
+    }
+
+    const { searchParams } = new URL(req.url);
+    const q = searchParams.get("q")?.trim();
+    const tripId = searchParams.get("tripId")?.trim();
+    const status = searchParams.get("status")?.trim();
+    const targetCompanyId =
+      session.role === "SUPER_ADMIN" ? searchParams.get("companyId") || session.companyId : session.companyId;
+
+    // Un agent sans compagnie ne doit rien voir (au lieu de tout voir).
+    if (session.role !== "SUPER_ADMIN" && !targetCompanyId) {
+      return NextResponse.json({ success: true, count: 0, data: [] });
+    }
+
+    const query: Record<string, unknown> = {};
+    if (targetCompanyId) query.companyId = targetCompanyId;
+    if (tripId && isValidObjectId(tripId)) query.tripId = tripId;
+    if (status) query.status = status;
+
+    if (q) {
+      const safe = escapeRegex(q);
+      query.$or = [
+        { shortCode: { $regex: safe, $options: "i" } },
+        { passengerPhone: { $regex: escapeRegex(q.replace(/\s+/g, "")) } },
+        { passengerName: { $regex: safe, $options: "i" } },
+      ];
+    }
+
+    const bookings = await Booking.find(query)
+      .select("-qrSignature")
+      .populate("tripId", "tripCode originCity destinationCity departureDate departureTime busPlateNumber")
+      .populate("companyId", "name code")
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+
+    return NextResponse.json({ success: true, count: bookings.length, data: bookings });
+  } catch (error) {
+    return handleApiError(error);
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
-    // 0. Sécurité : Rate Limiting anti-spam / anti-déni d'inventaire
+    // 0. Anti-spam (best effort : en serverless, la limite en mémoire est par instance)
     const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "anonymous_ip";
     const ipLimit = checkRateLimit(`ip_${clientIp}`, { windowMs: 10 * 60 * 1000, max: 10 });
     if (!ipLimit.allowed) {
@@ -25,19 +79,10 @@ export async function POST(req: NextRequest) {
     }
 
     await connectToDatabase();
+    const session = await getAuthSession(req);
 
     const body = await req.json();
-    const {
-      tripId,
-      originCity,
-      destinationCity,
-      passengerName,
-      passengerPhone,
-      passengerEmail,
-      seatsCount = 1,
-      couponCode,
-      userId = "guest_user",
-    } = body;
+    const { tripId, originCity, destinationCity, passengerName, passengerPhone, passengerEmail, seatsCount = 1, couponCode } = body;
 
     // 1. Validations de base
     if (!tripId || !originCity || !destinationCity || !passengerName || !passengerPhone) {
@@ -47,20 +92,31 @@ export async function POST(req: NextRequest) {
         400
       );
     }
+    if (!isValidObjectId(tripId)) {
+      throw new AppError("Voyage introuvable.", "NOT_FOUND", 404);
+    }
 
-    const requestedSeats = Number(seatsCount) || 1;
-    if (requestedSeats < 1 || requestedSeats > 50) {
-      throw new AppError("Le nombre de places doit être compris entre 1 et 50.", "VALIDATION_ERROR", 400);
+    const requestedSeats = Number(seatsCount);
+    if (!Number.isInteger(requestedSeats) || requestedSeats < 1 || requestedSeats > MAX_SEATS_PER_BOOKING) {
+      throw new AppError(
+        `Le nombre de places doit être un entier compris entre 1 et ${MAX_SEATS_PER_BOOKING}.`,
+        "VALIDATION_ERROR",
+        400
+      );
     }
 
     // 2. Normalisation stricte du numéro de téléphone E.164 (+229...)
-    const normalizedPhone = normalizePhoneNumber(passengerPhone);
+    const normalizedPhone = normalizePhoneNumber(String(passengerPhone));
 
-    // Rate Limiting par numéro de téléphone (Max 3 réservations temporaires actives en 10 min)
-    const phoneLimit = checkRateLimit(`phone_${normalizedPhone}`, { windowMs: 10 * 60 * 1000, max: 3 });
-    if (!phoneLimit.allowed) {
+    // Anti-blocage d'inventaire : max 3 réservations non payées en cours par numéro (vérifié en base).
+    const pendingForPhone = await Booking.countDocuments({
+      passengerPhone: normalizedPhone,
+      status: "PENDING_PAYMENT",
+      lockedUntil: { $gt: new Date() },
+    });
+    if (pendingForPhone >= 3) {
       throw new AppError(
-        `Ce numéro de téléphone a déjà plusieurs réservations en cours. Veuillez finaliser le paiement ou attendre ${phoneLimit.resetInSeconds} secondes.`,
+        "Ce numéro a déjà plusieurs réservations en attente de paiement. Finalisez-les ou patientez quelques minutes.",
         "VALIDATION_ERROR",
         429
       );
@@ -72,7 +128,6 @@ export async function POST(req: NextRequest) {
       throw new AppError("Voyage introuvable.", "NOT_FOUND", 404);
     }
 
-    // Vérification de la coupure H-2
     const now = new Date();
     const cutoffTime = new Date(trip.departureDateTime.getTime() - trip.cutoffMinutes * 60 * 1000);
     if (now >= cutoffTime || trip.status !== "OPEN") {
@@ -83,11 +138,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Récupération du prix pour le tronçon exact
     const segment = trip.pricing.find(
       (p) =>
-        p.from.toLowerCase() === originCity.toLowerCase() &&
-        p.to.toLowerCase() === destinationCity.toLowerCase()
+        p.from.toLowerCase() === String(originCity).toLowerCase() &&
+        p.to.toLowerCase() === String(destinationCity).toLowerCase()
     );
     if (!segment) {
       throw new AppError(
@@ -97,143 +151,124 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. RÉSERVATION ATOMIQUE ANTI-SURBOOKING (Soft-lock 7 minutes)
-    // Seul un appel atomique garantit qu'aucun autre utilisateur ne prenne le même siège
-    const updatedTrip = await Trip.findOneAndUpdate(
-      {
-        _id: tripId,
-        status: "OPEN",
-        availableSeats: { $gte: seatsCount },
-      },
-      {
-        $inc: { availableSeats: -seatsCount, lockedSeats: seatsCount },
-      },
+    // 4. Rend d'abord les places des paiements abandonnés sur ce voyage, puis verrou atomique.
+    await releaseExpiredBookings({ tripId: trip._id });
+
+    const lockedTrip = await Trip.findOneAndUpdate(
+      { _id: trip._id, status: "OPEN", availableSeats: { $gte: requestedSeats } },
+      { $inc: { availableSeats: -requestedSeats, lockedSeats: requestedSeats } },
       { returnDocument: "after" }
     );
-
-    if (!updatedTrip) {
-      throw new AppError(
-        "Désolé, il ne reste plus assez de places disponibles sur ce départ.",
-        "OVERBOOKING_ERROR",
-        409
-      );
+    if (!lockedTrip) {
+      throw new AppError("Désolé, il ne reste plus assez de places disponibles sur ce départ.", "OVERBOOKING_ERROR", 409);
     }
 
-    // 5. Calcul financier (Tarif de base, frais Kaweru, commissions et coupon)
-    const company = await Company.findById(trip.companyId);
-    const basePriceTotal = segment.price * seatsCount;
-
-    let serviceFeeTotal = 0;
-    if (company && company.commission.paidBy === "PASSENGER") {
-      serviceFeeTotal = company.commission.value * seatsCount;
-    }
-
-    let discountTotal = 0;
-    if (couponCode) {
-      const coupon = await Coupon.findOne({
-        code: couponCode.trim().toUpperCase(),
-        isActive: true,
-        expiresAt: { $gt: now },
-      });
-
-      if (coupon && basePriceTotal >= coupon.minTripAmount) {
-        discountTotal = coupon.discountAmount;
-      }
-    }
-
-    const totalToPay = Math.max(0, basePriceTotal + serviceFeeTotal - discountTotal);
-
-    // Calcul de la part revenant obligatoirement à la compagnie
-    let companySettlement = basePriceTotal;
-    if (company && company.commission.paidBy === "COMPANY") {
-      if (company.commission.type === "FIXED") {
-        companySettlement = Math.max(0, basePriceTotal - company.commission.value * seatsCount);
-      } else {
-        companySettlement = Math.max(0, basePriceTotal * (1 - company.commission.value / 100));
-      }
-    }
-
-    // 6. Génération des codes et clés de sécurité
-    const shortCode = generateShortCode();
-    const lockedUntil = new Date(Date.now() + 7 * 60 * 1000); // 7 minutes
-    const qrSignature = generateQrSignature(shortCode, normalizedPhone, totalToPay);
-
-    // 7. Création de la réservation
-    const booking: IBooking = new Booking({
-      shortCode,
-      tripId: trip._id,
-      companyId: trip.companyId,
-      userId,
-      passengerName: passengerName.trim(),
-      passengerPhone: normalizedPhone,
-      passengerEmail: passengerEmail?.trim() || null,
-      seatsCount: requestedSeats,
-      originCity,
-      destinationCity,
-      departureDateTime: trip.departureDateTime,
-      basePriceFcfa: basePriceTotal,
-      serviceFeeFcfa: serviceFeeTotal,
-      discountFcfa: discountTotal,
-      totalPaidFcfa: totalToPay,
-      companySettlementAmountFcfa: companySettlement,
-      status: "PENDING_PAYMENT",
-      paymentProvider: "FEDAPAY",
-      lockedUntil,
-      qrSignature,
-      boardingStatus: "NOT_BOARDED",
-      isSettledToCompany: false,
-    });
-
-    await booking.save();
-
-    // 8. Programme de Parrainage : Si l'acheteur est un filleul (inscrit via le lien d'un parrain),
-    // créditer automatiquement le parrain avec le nombre de points configuré par l'Admin à chaque achat
     try {
-      const buyerUser = await User.findOne({
-        $or: [
-          ...(userId && userId !== "guest_user" ? [{ firebaseUid: userId }] : []),
-          { phone: normalizedPhone },
-        ],
-      });
+      // 5. Calcul financier (tarif, frais Kaweru, commission, coupon)
+      const company = await Company.findById(trip.companyId);
+      const basePriceTotal = segment.price * requestedSeats;
 
-      if (buyerUser && buyerUser.referredBy) {
-        const refConfig = await ReferralConfig.findOne({ key: "GLOBAL_REFERRAL_CONFIG" });
-        const isRefActive = refConfig ? refConfig.isActive : true;
-        const pointsToAward = refConfig ? refConfig.pointsPerFilleulPurchase : 100;
+      let serviceFeeTotal = 0;
+      if (company && company.commission.paidBy === "PASSENGER") {
+        serviceFeeTotal = company.commission.value * requestedSeats;
+      }
 
-        if (isRefActive && pointsToAward > 0) {
-          await User.updateOne(
-            { referralCode: buyerUser.referredBy },
-            { $inc: { referralPoints: pointsToAward } }
-          );
+      let discountTotal = 0;
+      let appliedCoupon: string | null = null;
+      if (couponCode) {
+        const code = String(couponCode).trim().toUpperCase();
+        const coupon = await Coupon.findOne({ code, isActive: true, expiresAt: { $gt: now } });
+        if (coupon && basePriceTotal >= coupon.minTripAmount) {
+          const usesByPassenger = await Booking.countDocuments({
+            couponCode: code,
+            passengerPhone: normalizedPhone,
+            status: { $in: ["PENDING_PAYMENT", "CONFIRMED", "USED"] },
+          });
+          if (usesByPassenger < (coupon.maxUsesPerUser || 1)) {
+            discountTotal = Math.min(coupon.discountAmount, basePriceTotal);
+            appliedCoupon = code;
+          }
         }
       }
-    } catch {
-      // Ne jamais bloquer la réservation si la mise à jour des points échoue
-    }
 
-    return NextResponse.json(
-      {
-        success: true,
-        message: "Siège réservé temporairement pendant 7 minutes. Procédez au paiement Mobile Money.",
-        data: {
-          bookingId: booking._id,
-          shortCode: booking.shortCode,
-          passengerName: booking.passengerName,
-          passengerPhone: booking.passengerPhone,
-          originCity: booking.originCity,
-          destinationCity: booking.destinationCity,
-          departureDateTime: booking.departureDateTime,
-          basePriceFcfa: booking.basePriceFcfa,
-          serviceFeeFcfa: booking.serviceFeeFcfa,
-          discountFcfa: booking.discountFcfa,
-          totalToPayFcfa: booking.totalPaidFcfa,
-          lockedUntil: booking.lockedUntil,
-          expiresInSeconds: 420,
+      const totalToPay = Math.max(0, basePriceTotal + serviceFeeTotal - discountTotal);
+
+      let companySettlement = basePriceTotal;
+      if (company && company.commission.paidBy === "COMPANY") {
+        companySettlement =
+          company.commission.type === "FIXED"
+            ? Math.max(0, basePriceTotal - company.commission.value * requestedSeats)
+            : Math.max(0, Math.round(basePriceTotal * (1 - company.commission.value / 100)));
+      }
+
+      // 6. Création de la réservation (code court unique, quelques essais en cas de collision)
+      let booking = null;
+      for (let attempt = 0; attempt < 3 && !booking; attempt++) {
+        const draft = new Booking({
+          tripId: trip._id,
+          companyId: trip.companyId,
+          userId: session?.uid || "guest_user",
+          passengerName: String(passengerName).trim(),
+          passengerPhone: normalizedPhone,
+          passengerEmail: passengerEmail ? String(passengerEmail).trim() : null,
+          seatsCount: requestedSeats,
+          originCity,
+          destinationCity,
+          departureDateTime: trip.departureDateTime,
+          basePriceFcfa: basePriceTotal,
+          serviceFeeFcfa: serviceFeeTotal,
+          discountFcfa: discountTotal,
+          totalPaidFcfa: totalToPay,
+          companySettlementAmountFcfa: companySettlement,
+          status: "PENDING_PAYMENT",
+          paymentProvider: "FEDAPAY",
+          lockedUntil: new Date(Date.now() + PAYMENT_LOCK_MS),
+          boardingStatus: "NOT_BOARDED",
+          isSettledToCompany: false,
+          couponCode: appliedCoupon,
+        });
+        draft.shortCode = generateShortCode();
+        draft.qrSignature = generateQrSignature(draft._id.toString(), draft.shortCode, totalToPay);
+        try {
+          booking = await draft.save();
+        } catch (err) {
+          const isDuplicate = (err as { code?: number })?.code === 11000;
+          if (!isDuplicate || attempt === 2) throw err;
+        }
+      }
+      if (!booking) throw new Error("Impossible de générer un code de réservation unique.");
+
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Siège réservé temporairement pendant 7 minutes. Procédez au paiement Mobile Money.",
+          data: {
+            bookingId: booking._id,
+            shortCode: booking.shortCode,
+            passengerName: booking.passengerName,
+            passengerPhone: booking.passengerPhone,
+            originCity: booking.originCity,
+            destinationCity: booking.destinationCity,
+            departureDateTime: booking.departureDateTime,
+            seatsCount: booking.seatsCount,
+            basePriceFcfa: booking.basePriceFcfa,
+            serviceFeeFcfa: booking.serviceFeeFcfa,
+            discountFcfa: booking.discountFcfa,
+            totalToPayFcfa: booking.totalPaidFcfa,
+            lockedUntil: booking.lockedUntil,
+            expiresInSeconds: PAYMENT_LOCK_MS / 1000,
+          },
         },
-      },
-      { status: 201 }
-    );
+        { status: 201 }
+      );
+    } catch (err) {
+      // La réservation n'a pas pu être créée : on rend les places verrouillées.
+      await Trip.updateOne(
+        { _id: trip._id },
+        { $inc: { availableSeats: requestedSeats, lockedSeats: -requestedSeats } }
+      );
+      throw err;
+    }
   } catch (error) {
     return handleApiError(error);
   }

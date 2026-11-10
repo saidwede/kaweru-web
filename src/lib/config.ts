@@ -19,7 +19,7 @@ export const SUPPORTED_COUNTRIES: CountryConfig[] = [
     dialCode: "+229",
     flagEmoji: "🇧🇯",
     phoneLength: 10,
-    regex: "^\\+229(01)?[0-9]{8}$",
+    regex: "^\\+229[0-9]{8,10}$",
     isDefault: true,
     isActive: true,
   },
@@ -74,22 +74,28 @@ export function normalizePhoneNumber(rawPhone: string, defaultDialCode: string =
 
   // Cas spécifique Bénin (+229)
   if (defaultDialCode === "+229") {
-    // Si l'utilisateur saisit sans indicatif international (ex: "0197123456" ou "97123456")
-    if (!cleaned.startsWith("+")) {
-      if (cleaned.startsWith("229")) {
-        cleaned = "+" + cleaned;
-      } else {
-        // Si ancien format 8 chiffres (ex: 97123456), on ajoute le préfixe ARCEP "01"
-        if (cleaned.length === 8) {
-          cleaned = "01" + cleaned;
-        }
-        cleaned = `+229${cleaned}`;
-      }
-    } else if (cleaned.startsWith("+229")) {
-      // Si l'utilisateur a tapé +229 avec l'ancien format 8 chiffres (ex: +22997123456)
+    // Si le numéro commence par +229
+    if (cleaned.startsWith("+229")) {
       const nationalPart = cleaned.substring(4);
+      // S'il est à 8 chiffres (ancien format), on le préfixe avec 01
       if (nationalPart.length === 8) {
         cleaned = `+22901${nationalPart}`;
+      }
+    } else if (cleaned.startsWith("229")) {
+      const nationalPart = cleaned.substring(3);
+      if (nationalPart.length === 8) {
+        cleaned = `+22901${nationalPart}`;
+      } else {
+        cleaned = `+229${nationalPart}`;
+      }
+    } else {
+      // Saisie locale (ex: "0161006086" ou "61006086")
+      if (cleaned.length === 8) {
+        cleaned = `+22901${cleaned}`;
+      } else if (cleaned.length === 10) {
+        cleaned = `+229${cleaned}`;
+      } else {
+        cleaned = `+229${cleaned}`;
       }
     }
   } else {

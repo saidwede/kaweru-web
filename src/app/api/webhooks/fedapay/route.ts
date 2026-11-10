@@ -1,104 +1,71 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
+import { isValidObjectId } from "mongoose";
 import { connectToDatabase } from "@/lib/mongodb";
 import { Booking } from "@/models/Booking";
-import { Trip } from "@/models/Trip";
-import { Company } from "@/models/Company";
-import { sendTicketEmail } from "@/lib/mailer";
+import { verifyFedapaySignature, fetchFedapayTransaction } from "@/lib/fedapay";
+import { confirmPaidBooking, cancelPendingBooking } from "@/lib/bookingLifecycle";
 
-const FEDAPAY_WEBHOOK_SECRET = process.env.FEDAPAY_WEBHOOK_SECRET || "";
-
-if (process.env.NODE_ENV === "production" && !FEDAPAY_WEBHOOK_SECRET) {
-  console.error("ALERTE SÉCURITÉ : FEDAPAY_WEBHOOK_SECRET n'est pas configuré en production.");
-}
+const APPROVED = new Set(["approved", "transferred"]);
+const FAILED = new Set(["canceled", "cancelled", "declined", "refunded"]);
 
 export async function POST(req: NextRequest) {
+  const secret = process.env.FEDAPAY_WEBHOOK_SECRET || "";
+  if (!secret) {
+    console.error("[Webhook FedaPay] FEDAPAY_WEBHOOK_SECRET non configuré : webhook refusé.");
+    return NextResponse.json({ error: "Webhook not configured" }, { status: 503 });
+  }
+
+  const rawBody = await req.text();
+  if (!verifyFedapaySignature(rawBody, req.headers.get("x-fedapay-signature"), secret)) {
+    console.error("[Webhook FedaPay] Signature absente ou invalide.");
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
   try {
-    const rawBody = await req.text();
-    const signature = req.headers.get("x-fedapay-signature");
-
-    // 1. Vérification de la signature cryptographique (si secret configuré en production)
-    if (FEDAPAY_WEBHOOK_SECRET && signature) {
-      const computedSignature = crypto
-        .createHmac("sha256", FEDAPAY_WEBHOOK_SECRET)
-        .update(rawBody)
-        .digest("hex");
-
-      if (computedSignature !== signature) {
-        console.error("[Webhook Fedapay] Signature HMAC invalide.");
-        return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
-      }
-    }
-
     const payload = JSON.parse(rawBody);
-    const event = payload.name || payload.event;
     const entity = payload.entity || payload;
+    const bookingId = entity.custom_metadata?.booking_id || entity.description;
 
-    console.log(`[Webhook Fedapay] Événement reçu: ${event}, Transaction: ${entity.id}, Statut: ${entity.status}`);
+    if (!entity.id || !isValidObjectId(bookingId)) {
+      console.warn("[Webhook FedaPay] Événement sans transaction ou réservation exploitable.");
+      return NextResponse.json({ received: true });
+    }
 
     await connectToDatabase();
-
-    // Recherche de la réservation via la référence personnalisée ou l'ID de transaction
-    const bookingId = entity.custom_metadata?.booking_id || entity.description;
     const booking = await Booking.findById(bookingId);
-
     if (!booking) {
-      console.warn(`[Webhook Fedapay] Réservation ${bookingId} introuvable.`);
-      return NextResponse.json({ received: true }, { status: 200 });
+      console.warn(`[Webhook FedaPay] Réservation ${bookingId} introuvable.`);
+      return NextResponse.json({ received: true });
     }
 
-    // Si la transaction est approuvée (payée par Mobile Money)
-    if (entity.status === "approved" || event === "transaction.approved") {
-      if (booking.status === "PENDING_PAYMENT") {
-        booking.status = "CONFIRMED";
-        booking.paymentReference = String(entity.id || entity.reference);
-        await booking.save();
+    // Source de vérité : l'API FedaPay (si la clé secrète est configurée), sinon l'événement signé.
+    const verified = await fetchFedapayTransaction(entity.id);
+    const status = String(verified?.status ?? entity.status ?? "").toLowerCase();
+    const amount = Number(verified?.amount ?? entity.amount);
+    const paymentRef = String(entity.id);
 
-        // Transfert définitif du siège : lockedSeats -> soldSeats
-        const count = booking.seatsCount || 1;
-        await Trip.findByIdAndUpdate(booking.tripId, {
-          $inc: { lockedSeats: -count, soldSeats: count },
-        });
-
-        // Récupération de la compagnie pour le mail
-        const company = await Company.findById(booking.companyId);
-
-        // Envoi d'email automatique de confirmation si un email a été fourni
-        if (booking.passengerEmail) {
-          await sendTicketEmail({
-            to: booking.passengerEmail,
-            passengerName: booking.passengerName,
-            shortCode: booking.shortCode,
-            companyName: company?.name || "Compagnie Partenaire",
-            originCity: booking.originCity,
-            destinationCity: booking.destinationCity,
-            departureDateTime: new Date(booking.departureDateTime).toLocaleString("fr-FR", {
-              timeZone: "Africa/Porto-Novo",
-            }),
-            seatNumber: booking.seatNumber,
-            totalPaidFcfa: booking.totalPaidFcfa,
-          });
-        }
-
-        console.log(`[Webhook Fedapay] Billet ${booking.shortCode} confirmé pour ${booking.passengerName}`);
+    if (APPROVED.has(status)) {
+      if (amount !== booking.totalPaidFcfa) {
+        console.error(
+          `[Webhook FedaPay] Montant incohérent pour ${booking.shortCode} : reçu ${amount}, attendu ${booking.totalPaidFcfa}.`
+        );
+        return NextResponse.json({ received: true, ignored: "amount_mismatch" });
       }
-    } else if (entity.status === "canceled" || entity.status === "declined") {
-      if (booking.status === "PENDING_PAYMENT") {
-        booking.status = "EXPIRED";
-        await booking.save();
-
-        // Restitution du siège
-        await Trip.findByIdAndUpdate(booking.tripId, {
-          $inc: { availableSeats: 1, lockedSeats: -1 },
-        });
-        console.log(`[Webhook Fedapay] Paiement échoué, siège libéré pour ${booking.shortCode}`);
-      }
+      const outcome = await confirmPaidBooking(booking._id, paymentRef);
+      console.log(`[Webhook FedaPay] ${booking.shortCode} → ${outcome}`);
+      return NextResponse.json({ success: true, outcome });
     }
 
-    return NextResponse.json({ success: true }, { status: 200 });
+    if (FAILED.has(status)) {
+      const released = await cancelPendingBooking(booking._id);
+      console.log(`[Webhook FedaPay] ${booking.shortCode} paiement ${status}, places libérées : ${released}`);
+      return NextResponse.json({ success: true });
+    }
+
+    return NextResponse.json({ received: true });
   } catch (error) {
-    console.error("[Webhook Fedapay Error]", error);
-    // On répond 200 pour éviter que l'agrégateur ne boucle indéfiniment sur une erreur interne
-    return NextResponse.json({ success: false, error: "Internal processing error" }, { status: 200 });
+    // Traitement idempotent : on renvoie 500 pour que FedaPay réessaie plutôt que de perdre un paiement.
+    console.error("[Webhook FedaPay Error]", error);
+    return NextResponse.json({ success: false }, { status: 500 });
   }
 }

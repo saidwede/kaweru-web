@@ -40,6 +40,7 @@ async function launchOfficialGooglePopup(): Promise<{
   email: string;
   displayName: string | null;
   uid: string;
+  idToken: string;
 }> {
   const importEsm = new Function("url", "return import(url)");
   const firebaseApp = await importEsm(
@@ -64,6 +65,7 @@ async function launchOfficialGooglePopup(): Promise<{
     email: cred.user?.email || "",
     displayName: cred.user?.displayName || null,
     uid: cred.user?.uid || "",
+    idToken: cred.user ? await cred.user.getIdToken() : "",
   };
 }
 
@@ -98,6 +100,18 @@ function LoginFormContent() {
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    // Si l'utilisateur a déjà une session active, le rediriger
+    fetch("/api/auth/me")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.user) {
+          router.replace(explicitRedirect || "/profile");
+        }
+      })
+      .catch(() => {});
+  }, [explicitRedirect, router]);
 
   const switchMethod = (newMethod: LoginMethod) => {
     setMethod(newMethod);
@@ -297,9 +311,8 @@ function LoginFormContent() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           loginMethod: "GOOGLE",
-          email: gUser.email,
+          idToken: gUser.idToken,
           name: gUser.displayName || gUser.email.split("@")[0],
-          googleUid: gUser.uid,
           referredBy: referralParam,
         }),
       });

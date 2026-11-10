@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/mongodb";
-import { User } from "@/models/User";
+import { getAuthSession, requireSession } from "@/lib/auth";
+import { AppError } from "@/lib/errors";
 import { ReferralConfig } from "@/models/ReferralConfig";
 
 export async function OPTIONS() {
@@ -11,9 +12,8 @@ export async function GET(req: NextRequest) {
   try {
     await connectToDatabase();
 
-    const { searchParams } = new URL(req.url);
-    const uid = searchParams.get("uid");
-    const phone = searchParams.get("phone");
+    // Les points ne sont visibles que par leur propriétaire (plus de consultation par uid/téléphone arbitraire).
+    const session = await getAuthSession(req);
 
     let config = await ReferralConfig.findOne({ key: "GLOBAL_REFERRAL_CONFIG" });
     if (!config) {
@@ -25,22 +25,17 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    let user = null;
-    if (uid) {
-      user = await User.findOne({ firebaseUid: uid });
-    } else if (phone) {
-      user = await User.findOne({ phone });
-    }
+    const user = session?.user ?? null;
 
-    const referralCode =
-      user?.referralCode ||
-      `KWR${(uid || "USER").replace(/[^a-zA-Z0-9]/g, "").slice(-5).toUpperCase()}`;
+    // Le parrainage utilise l'identifiant unique de l'utilisateur (firebaseUid ou _id)
+    const referralId = user ? (user.firebaseUid || user._id.toString()) : "USER";
+    const referralLinkWeb = `https://kaweru-reactiver.vercel.app/login?ref=${referralId}`;
 
     return NextResponse.json({
       success: true,
-      referralCode,
-      referralLinkWeb: `https://kaweru-reactiver.vercel.app/login?ref=${referralCode}`,
-      referralLinkApp: `https://kaweru-app.web.app/?ref=${referralCode}`,
+      referralCode: referralId,
+      referralId,
+      referralLinkWeb,
       referralPoints: user?.referralPoints || 0,
       referralsCount: user?.referralsCount || 0,
       config: {
@@ -57,7 +52,7 @@ export async function GET(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
-    await connectToDatabase();
+    await requireSession(req, ["SUPER_ADMIN"]);
 
     const body = await req.json();
     const { pointsPerFilleulPurchase, fcfaValuePerPoint, isActive } = body;
@@ -95,8 +90,11 @@ export async function PUT(req: NextRequest) {
       },
     });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Erreur de mise à jour parrainage";
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    if (error instanceof AppError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: error.statusCode });
+    }
+    console.error("[referrals PUT]", error);
+    return NextResponse.json({ success: false, error: "Erreur de mise à jour parrainage" }, { status: 500 });
   }
 }
 

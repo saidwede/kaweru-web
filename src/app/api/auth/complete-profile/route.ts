@@ -1,16 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizePhoneNumber } from "@/lib/config";
-import { connectToDatabase } from "@/lib/mongodb";
-import { User, UserRole } from "@/models/User";
+import { getAuthSession } from "@/lib/auth";
+import { applySessionCookie, signSession, SessionData } from "@/lib/session";
+import { User } from "@/models/User";
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204 });
 }
 
+function isPlaceholderPhone(phone?: string | null): boolean {
+  return !phone || phone.startsWith("email_") || phone.startsWith("google_");
+}
+
+/**
+ * POST /api/auth/complete-profile
+ * Complète le profil de l'utilisateur CONNECTÉ uniquement (session signée obligatoire).
+ * Le rôle et l'e-mail ne sont jamais modifiables ici : ils proviennent d'une connexion vérifiée.
+ */
 export async function POST(req: NextRequest) {
   try {
+    const session = await getAuthSession(req);
+    if (!session) {
+      return NextResponse.json(
+        { success: false, error: "Session expirée. Veuillez vous reconnecter." },
+        { status: 401 }
+      );
+    }
+
     const body = await req.json();
-    const { uid, firstName, lastName, phone, email, residenceCity } = body;
+    const { firstName, lastName, phone, residenceCity } = body;
 
     const cleanFirstName = String(firstName || "").trim();
     const cleanLastName = String(lastName || "").trim();
@@ -22,7 +40,6 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-
     if (!cleanCity) {
       return NextResponse.json(
         { success: false, error: "Veuillez sélectionner votre ville de résidence." },
@@ -30,163 +47,76 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await connectToDatabase();
+    const userDoc = session.user;
+    let finalPhone = userDoc.phone;
 
-    // Trouver l'utilisateur par firebaseUid, email ou téléphone
-    let userDoc = uid ? await User.findOne({ firebaseUid: String(uid) }) : null;
-    if (!userDoc && email) {
-      userDoc = await User.findOne({ email: String(email).trim().toLowerCase() });
-    }
-    if (!userDoc && phone) {
-      const norm = normalizePhoneNumber(String(phone));
-      userDoc = await User.findOne({ phone: norm });
-    }
-
-    const fullName = `${cleanFirstName} ${cleanLastName}`.trim();
-    let finalPhone = userDoc?.phone || "";
-
-    // Si un numéro est fourni (obligatoire lors d'une inscription par Email ou Google)
     if (phone && String(phone).trim().length >= 8) {
-      finalPhone = normalizePhoneNumber(String(phone));
+      const normalized = normalizePhoneNumber(String(phone));
+      // Le numéro ne peut être renseigné qu'une seule fois (comptes créés par e-mail / Google), jamais remplacé.
+      if (normalized !== userDoc.phone && !isPlaceholderPhone(userDoc.phone)) {
+        return NextResponse.json(
+          { success: false, error: "Le numéro de téléphone ne peut pas être modifié. Contactez le support Kaweru." },
+          { status: 403 }
+        );
+      }
+      if (normalized !== userDoc.phone) {
+        const taken = await User.exists({ phone: normalized, _id: { $ne: userDoc._id } });
+        if (taken) {
+          return NextResponse.json(
+            { success: false, error: "Ce numéro est déjà associé à un autre compte Kaweru." },
+            { status: 409 }
+          );
+        }
+        finalPhone = normalized;
+      }
     }
 
-    if (!finalPhone || finalPhone.startsWith("email_") || finalPhone.startsWith("google_")) {
+    if (isPlaceholderPhone(finalPhone)) {
       return NextResponse.json(
         { success: false, error: "Veuillez saisir votre numéro de téléphone (+229)." },
         { status: 400 }
       );
     }
 
-    let userRole: UserRole = "PASSENGER";
-    let userUid = uid ? String(uid) : `usr_${Date.now()}`;
-    let referralCode =
-      userDoc?.referralCode || `KWR${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-    let referralPoints = userDoc?.referralPoints || 0;
-    const cleanEmail = email ? String(email).trim().toLowerCase() : userDoc?.email;
-    const envSuperAdmins = (process.env.SUPER_ADMIN_EMAILS || "")
-      .split(",")
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean);
-    const isSuperAdminEmail = Boolean(cleanEmail && envSuperAdmins.includes(cleanEmail));
+    userDoc.firstName = cleanFirstName;
+    userDoc.lastName = cleanLastName;
+    userDoc.fullName = `${cleanFirstName} ${cleanLastName}`;
+    userDoc.phone = finalPhone;
+    userDoc.residenceCity = cleanCity;
+    userDoc.isProfileCompleted = true;
+    await userDoc.save();
 
-    if (userDoc) {
-      userDoc.firstName = cleanFirstName;
-      userDoc.lastName = cleanLastName;
-      userDoc.fullName = fullName;
-      userDoc.phone = finalPhone;
-      if (cleanEmail) userDoc.email = cleanEmail;
-      if (isSuperAdminEmail) userDoc.role = "SUPER_ADMIN";
-      userDoc.residenceCity = cleanCity;
-      userDoc.isProfileCompleted = true;
-
-      try {
-        await userDoc.save();
-      } catch {
-        // Si le numéro existe déjà sur un autre document, fusionner proprement
-        await User.updateOne(
-          { _id: userDoc._id },
-          {
-            $set: {
-              firstName: cleanFirstName,
-              lastName: cleanLastName,
-              fullName,
-              residenceCity: cleanCity,
-              isProfileCompleted: true,
-              ...(isSuperAdminEmail ? { role: "SUPER_ADMIN" } : {}),
-            },
-          }
-        );
-      }
-
-      userRole = isSuperAdminEmail ? "SUPER_ADMIN" : userDoc.role;
-      userUid = userDoc.firebaseUid || userDoc._id.toString();
-    } else {
-      try {
-        const created = await User.create({
-          firebaseUid: userUid,
-          phone: finalPhone,
-          email: cleanEmail,
-          firstName: cleanFirstName,
-          lastName: cleanLastName,
-          fullName,
-          residenceCity: cleanCity,
-          isProfileCompleted: true,
-          role: isSuperAdminEmail ? "SUPER_ADMIN" : "PASSENGER",
-          referralCode: `KWR${Math.random().toString(36).substring(2, 7).toUpperCase()}`,
-          walletCreditsFcfa: 0,
-          isActive: true,
-        });
-        userRole = created.role;
-        userUid = created.firebaseUid;
-      } catch {
-        // En cas de doublon téléphone, mettre à jour l'existant
-        const existingByPhone = await User.findOneAndUpdate(
-          { phone: finalPhone },
-          {
-            $set: {
-              firstName: cleanFirstName,
-              lastName: cleanLastName,
-              fullName,
-              residenceCity: cleanCity,
-              isProfileCompleted: true,
-              ...(cleanEmail ? { email: cleanEmail } : {}),
-            },
-          },
-          { returnDocument: "after" }
-        );
-        if (existingByPhone) {
-          userRole = existingByPhone.role;
-          userUid = existingByPhone.firebaseUid;
-        }
-      }
-    }
-
+    const role = userDoc.role;
     let redirectUrl = "/";
-    if (
-      userRole === "STATION_MANAGER" ||
-      userRole === "COMPANY_ADMIN" ||
-      userRole === "SUPER_ADMIN"
-    ) {
-      redirectUrl = "/manifest";
-    } else if (userRole === "ONBOARD_CONDUCTOR") {
-      redirectUrl = "/conductor";
-    }
+    if (role === "SUPER_ADMIN") redirectUrl = "/admin";
+    else if (role === "STATION_MANAGER" || role === "COMPANY_ADMIN" || role === "TICKET_AGENT") redirectUrl = "/manifest";
+    else if (role === "ONBOARD_CONDUCTOR") redirectUrl = "/conductor";
 
-    const sessionData = {
-      uid: userUid,
-      role: userRole,
+    const sessionData: SessionData = {
+      ...session.token,
+      uid: session.uid,
+      role,
+      companyId: userDoc.companyId ? userDoc.companyId.toString() : null,
       phone: finalPhone,
-      email: cleanEmail,
+      email: userDoc.email,
       firstName: cleanFirstName,
       lastName: cleanLastName,
-      name: fullName,
+      name: userDoc.fullName,
       residenceCity: cleanCity,
       isProfileCompleted: true,
-      referralCode,
-      referralPoints,
-      companyName: userRole === "PASSENGER" ? "Kaweru" : "Confort Lines",
+      referralCode: userDoc.referralCode,
+      referralPoints: userDoc.referralPoints,
     };
 
-    const encodedSession = Buffer.from(JSON.stringify(sessionData)).toString("base64");
-
-    const response = NextResponse.json({
-      success: true,
-      token: encodedSession,
-      user: sessionData,
-      redirectUrl,
-    });
-
-    response.cookies.set("kaweru_session", encodedSession, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
-
+    const token = signSession(sessionData);
+    const response = NextResponse.json({ success: true, token, user: sessionData, redirectUrl });
+    applySessionCookie(response, token);
     return response;
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Erreur lors de la mise à jour du profil";
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    console.error("[auth/complete-profile]", error);
+    return NextResponse.json(
+      { success: false, error: "Erreur lors de la mise à jour du profil" },
+      { status: 500 }
+    );
   }
 }

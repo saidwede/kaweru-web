@@ -1,21 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
-import { connectToDatabase } from "@/lib/mongodb";
+import { isValidObjectId } from "mongoose";
+import { requireSession, assertCompanyAccess, STAFF_ROLES } from "@/lib/auth";
 import { Trip } from "@/models/Trip";
 import { Booking } from "@/models/Booking";
 import { handleApiError, AppError } from "@/lib/errors";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await connectToDatabase();
+    // La fiche de chargement contient noms et téléphones des passagers : personnel uniquement.
+    const session = await requireSession(req, STAFF_ROLES);
     const { id } = await params;
+    if (!isValidObjectId(id)) {
+      throw new AppError("Voyage introuvable", "NOT_FOUND", 404);
+    }
 
     const trip = await Trip.findById(id).populate("companyId", "name code logoUrl settlementMomo");
     if (!trip) {
       throw new AppError("Voyage introuvable", "NOT_FOUND", 404);
     }
+    const tripCompany = trip.companyId as unknown as { _id?: unknown } | null;
+    assertCompanyAccess(session, tripCompany?._id ?? trip.companyId);
 
     // Récupération de tous les billets confirmés pour ce voyage
     const bookings = await Booking.find({

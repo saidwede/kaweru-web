@@ -3,7 +3,7 @@ import { connectToDatabase } from "@/lib/mongodb";
 import { Trip } from "@/models/Trip";
 import { Booking } from "@/models/Booking";
 import { handleApiError, AppError } from "@/lib/errors";
-import { authenticateRequest, authorizeRoles } from "@/lib/auth";
+import { authenticateRequest, authorizeRoles, assertCompanyAccess } from "@/lib/auth";
 
 export async function POST(
   req: NextRequest,
@@ -24,6 +24,7 @@ export async function POST(
     if (!trip) {
       throw new AppError("Voyage introuvable.", "NOT_FOUND", 404);
     }
+    assertCompanyAccess(user, trip.companyId);
 
     // 1. Validation de l'embarquement (Scan QR ou saisie du code court)
     if (type === "VALIDATE_BOARDING") {
