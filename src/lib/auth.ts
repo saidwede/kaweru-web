@@ -1,25 +1,17 @@
 import { NextRequest } from "next/server";
 import { isValidObjectId } from "mongoose";
-import { getApps, initializeApp, cert } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { AppError } from "./errors";
 import { connectToDatabase } from "./mongodb";
 import { readSessionToken, verifySessionToken, SessionData } from "./session";
 import { User, IUser, UserRole } from "@/models/User";
 
-if (!getApps().length) {
-  try {
-    const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
-    if (serviceAccountKey) {
-      initializeApp({ credential: cert(JSON.parse(serviceAccountKey)) });
-    } else {
-      // La vérification des ID tokens ne nécessite que le projectId.
-      initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || "kaweru-app" });
-    }
-  } catch (error) {
-    console.warn("[Firebase Admin] Initialisation impossible:", error);
-  }
-}
+// Clés publiques Google qui signent les ID tokens Firebase (mises en cache par jose).
+// On n'utilise plus firebase-admin : il ne se charge pas sur le runtime Node de Vercel
+// (jwks-rsa fait un require() du module ES « jose »), ce qui faisait planter toutes les routes.
+const FIREBASE_JWKS = createRemoteJWKSet(
+  new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
+);
 
 export const STAFF_ROLES: UserRole[] = [
   "SUPER_ADMIN",
@@ -104,17 +96,27 @@ export interface VerifiedGoogleIdentity {
   name?: string;
 }
 
-/** Vérifie un ID token Firebase (connexion Google) côté serveur. */
+/**
+ * Vérifie un ID token Firebase (connexion Google) côté serveur, selon la procédure officielle :
+ * signature RS256 par les clés Google, émetteur securetoken.google.com/<projet>, audience = projet, expiration.
+ */
 export async function verifyGoogleIdToken(idToken: string): Promise<VerifiedGoogleIdentity> {
+  const projectId =
+    process.env.FIREBASE_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "kaweru-app";
   try {
-    const decoded = await getAuth().verifyIdToken(idToken, true);
-    if (!decoded.email || decoded.email_verified !== true) {
+    const { payload } = await jwtVerify(idToken, FIREBASE_JWKS, {
+      issuer: `https://securetoken.google.com/${projectId}`,
+      audience: projectId,
+      algorithms: ["RS256"],
+    });
+    const email = typeof payload.email === "string" ? payload.email : "";
+    if (!payload.sub || !email || payload.email_verified !== true) {
       throw new AppError("Adresse e-mail Google non vérifiée.", "UNAUTHORIZED", 401);
     }
     return {
-      uid: decoded.uid,
-      email: decoded.email.trim().toLowerCase(),
-      name: typeof decoded.name === "string" ? decoded.name : undefined,
+      uid: payload.sub,
+      email: email.trim().toLowerCase(),
+      name: typeof payload.name === "string" ? payload.name : undefined,
     };
   } catch (err) {
     if (err instanceof AppError) throw err;

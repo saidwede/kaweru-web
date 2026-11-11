@@ -96,6 +96,23 @@ async function main() {
     assert.equal(verifySessionToken(legacy), null);
   });
 
+  console.log("\nConnexion Google");
+  await test("un jeton Google forgé (mauvaise clé) est rejeté", async () => {
+    const { generateKeyPair, SignJWT } = await import("jose");
+    const { verifyGoogleIdToken } = await import("../lib/auth");
+    const { privateKey } = await generateKeyPair("RS256");
+    const forged = await new SignJWT({ email: "admin@kaweru.bj", email_verified: true })
+      .setProtectedHeader({ alg: "RS256", kid: "faux" })
+      .setIssuer("https://securetoken.google.com/kaweru-app")
+      .setAudience("kaweru-app")
+      .setSubject("attaquant")
+      .setIssuedAt()
+      .setExpirationTime("1h")
+      .sign(privateKey);
+    await assert.rejects(() => verifyGoogleIdToken(forged));
+    await assert.rejects(() => verifyGoogleIdToken("pas-un-jeton"));
+  });
+
   console.log("\nQR, FedaPay, regex");
   await test("signature QR valide / montant falsifié rejeté / longueur invalide sans exception", () => {
     const code = generateShortCode();
