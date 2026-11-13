@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
+import { SESSION_COOKIE, verifySessionCookie } from "@/lib/sessionCookie";
 
-// Garde d'interface : vérifie la signature de la session et le rôle porté par le jeton.
-// Les routes API revérifient toujours le rôle en base (voir lib/auth.ts).
+// Garde d'interface : vérifie la signature du cookie de session Firebase et le rôle qu'il porte.
+// L'API (Cloud Functions) revérifie toujours le rôle en base (Firestore) à chaque requête.
 const PROTECTED_ROUTES = [
   { path: "/manifest", allowedRoles: ["SUPER_ADMIN", "COMPANY_ADMIN", "STATION_MANAGER", "TICKET_AGENT"] },
   { path: "/conductor", allowedRoles: ["SUPER_ADMIN", "COMPANY_ADMIN", "STATION_MANAGER", "ONBOARD_CONDUCTOR"] },
@@ -18,7 +18,7 @@ function redirectToLogin(req: NextRequest, pathname: string, clearCookie = false
   return response;
 }
 
-export function proxy(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   const matchedRule = PROTECTED_ROUTES.find(
@@ -29,10 +29,10 @@ export function proxy(req: NextRequest) {
   const rawCookie = req.cookies.get(SESSION_COOKIE)?.value;
   if (!rawCookie) return redirectToLogin(req, pathname);
 
-  const session = verifySessionToken(rawCookie);
+  const session = await verifySessionCookie(rawCookie);
   if (!session) return redirectToLogin(req, pathname, true);
 
-  if (session.role !== "SUPER_ADMIN" && !matchedRule.allowedRoles.includes(session.role)) {
+  if (session.role !== "SUPER_ADMIN" && !matchedRule.allowedRoles.includes(session.role || "")) {
     return redirectToLogin(req, pathname);
   }
 

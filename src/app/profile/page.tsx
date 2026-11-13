@@ -1,5 +1,6 @@
 "use client";
 
+import { signOutEverywhere } from "@/lib/firebaseClient";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -120,7 +121,7 @@ export default function ProfilePage() {
   };
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await signOutEverywhere();
     router.push("/login");
     router.refresh();
   };

@@ -1,9 +1,18 @@
 "use client";
 
-import React, { useState, Suspense } from "react";
+import React, { useRef, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { firebaseClientConfig } from "@/lib/firebaseClient";
+import {
+  GoogleAuthProvider,
+  RecaptchaVerifier,
+  signInWithCustomToken,
+  signInWithPhoneNumber,
+  signInWithPopup,
+  type ConfirmationResult,
+} from "firebase/auth";
+import { completeFirebaseLogin, getFirebaseAuth, type LoginResponse } from "@/lib/firebaseClient";
+import { normalizePhoneNumber } from "@/lib/config";
 import {
   Bus,
   Phone,
@@ -36,37 +45,28 @@ const BENIN_CITIES = [
   "Malanville",
 ];
 
-async function launchOfficialGooglePopup(): Promise<{
-  email: string;
-  displayName: string | null;
-  uid: string;
-  idToken: string;
-}> {
-  const importEsm = new Function("url", "return import(url)");
-  const firebaseApp = await importEsm(
-    "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js"
-  );
-  const firebaseAuth = await importEsm(
-    "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js"
-  );
-
-  const app =
-    firebaseApp.getApps().length === 0
-      ? firebaseApp.initializeApp(firebaseClientConfig)
-      : firebaseApp.getApps()[0];
-  const auth = firebaseAuth.getAuth(app);
-  const provider = new firebaseAuth.GoogleAuthProvider();
-  provider.addScope("email");
-  provider.addScope("profile");
-  provider.setCustomParameters({ prompt: "select_account" });
-
-  const cred = await firebaseAuth.signInWithPopup(auth, provider);
-  return {
-    email: cred.user?.email || "",
-    displayName: cred.user?.displayName || null,
-    uid: cred.user?.uid || "",
-    idToken: cred.user ? await cred.user.getIdToken() : "",
-  };
+/** Messages lisibles pour les erreurs Firebase Auth les plus courantes. */
+function firebaseErrorMessage(err: unknown, fallback: string): string {
+  const code = (err as { code?: string })?.code || "";
+  switch (code) {
+    case "auth/invalid-phone-number":
+      return "Numéro de téléphone invalide.";
+    case "auth/too-many-requests":
+    case "auth/quota-exceeded":
+      return "Trop de tentatives. Patientez quelques minutes avant de réessayer.";
+    case "auth/invalid-verification-code":
+      return "Code incorrect. Vérifiez le SMS reçu.";
+    case "auth/code-expired":
+      return "Ce code a expiré. Demandez-en un nouveau.";
+    case "auth/user-disabled":
+      return "Votre compte a été désactivé par l'administrateur.";
+    case "auth/captcha-check-failed":
+      return "La vérification anti-robot a échoué. Rechargez la page.";
+    case "auth/network-request-failed":
+      return "Erreur réseau. Vérifiez votre connexion.";
+    default:
+      return fallback;
+  }
 }
 
 function LoginFormContent() {
@@ -81,10 +81,12 @@ function LoginFormContent() {
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
-  const [challengeToken, setChallengeToken] = useState<string | undefined>(undefined);
+
+  // Connexion SMS gérée par Firebase Auth (reCAPTCHA invisible + code envoyé par Firebase).
+  const confirmationRef = useRef<ConfirmationResult | null>(null);
+  const recaptchaRef = useRef<RecaptchaVerifier | null>(null);
 
   // Champs de complétion de profil (après 1ère inscription)
-  const [currentUserUid, setCurrentUserUid] = useState<string>("");
   const [pendingRedirectUrl, setPendingRedirectUrl] = useState<string>("/");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -113,6 +115,13 @@ function LoginFormContent() {
       .catch(() => {});
   }, [explicitRedirect, router]);
 
+  React.useEffect(() => {
+    return () => {
+      recaptchaRef.current?.clear();
+      recaptchaRef.current = null;
+    };
+  }, []);
+
   const switchMethod = (newMethod: LoginMethod) => {
     setMethod(newMethod);
     setStep("REQUEST");
@@ -122,7 +131,12 @@ function LoginFormContent() {
     setInstantCodeBanner(null);
   };
 
-  // Étape 1 : Demander l'envoi du code OTP (SMS ou Email)
+  const resetRecaptcha = () => {
+    recaptchaRef.current?.clear();
+    recaptchaRef.current = null;
+  };
+
+  // Étape 1 : Demander l'envoi du code (SMS via Firebase, ou e-mail via l'API Kaweru)
   const handleRequestOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setErrorMessage(null);
@@ -140,55 +154,58 @@ function LoginFormContent() {
 
     setLoading(true);
     try {
+      if (method === "PHONE") {
+        let normalized: string;
+        try {
+          normalized = normalizePhoneNumber(phone);
+        } catch (err) {
+          setErrorMessage(err instanceof Error ? err.message : "Numéro de téléphone invalide.");
+          return;
+        }
+        const auth = getFirebaseAuth();
+        if (!recaptchaRef.current) {
+          recaptchaRef.current = new RecaptchaVerifier(auth, "recaptcha-container", { size: "invisible" });
+        }
+        confirmationRef.current = await signInWithPhoneNumber(auth, normalized, recaptchaRef.current);
+        setStep("VERIFY");
+        setInfoMessage(`Code SMS envoyé au ${normalized}`);
+        return;
+      }
+
       const res = await fetch("/api/auth/send-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          method,
-          phone: method === "PHONE" ? phone : undefined,
-          email: method === "EMAIL" ? email : undefined,
-        }),
+        body: JSON.stringify({ method: "EMAIL", email }),
       });
-
       const data = await res.json();
       if (data.success) {
-        setChallengeToken(data.challengeToken);
         setStep("VERIFY");
         setInfoMessage(data.message);
-        if (data.fallbackCode) {
-          setInstantCodeBanner(data.fallbackCode);
-        }
+        if (data.fallbackCode) setInstantCodeBanner(data.fallbackCode);
       } else {
         setErrorMessage(data.error || "Impossible d'envoyer le code OTP.");
       }
-    } catch {
-      setErrorMessage("Erreur réseau lors de l'envoi du code OTP.");
+    } catch (err) {
+      if (method === "PHONE") resetRecaptcha();
+      setErrorMessage(
+        method === "PHONE"
+          ? firebaseErrorMessage(err, "Impossible d'envoyer le SMS. Réessayez.")
+          : "Erreur réseau lors de l'envoi du code OTP."
+      );
     } finally {
       setLoading(false);
     }
   };
 
-  // Gérer la suite après vérification réussie (Profil complet vs Compléter uniquement ce qui manque)
-  const handlePostAuthSuccess = (data: {
-    user?: {
-      uid?: string;
-      firstName?: string;
-      lastName?: string;
-      phone?: string;
-      email?: string;
-      residenceCity?: string;
-    };
-    needsProfileCompletion?: boolean;
-    redirectUrl?: string;
-  }) => {
+  // Gérer la suite après connexion réussie (Profil complet vs Compléter uniquement ce qui manque)
+  const handlePostAuthSuccess = (data: LoginResponse) => {
     const destination = explicitRedirect || data.redirectUrl || "/";
     if (data.needsProfileCompletion) {
       const uFirst = data.user?.firstName || "";
       const uLast = data.user?.lastName || "";
-      const uPhone = data.user?.phone || (method === "PHONE" ? phone : "");
+      const uPhone = data.user?.phone || "";
       const uEmail = data.user?.email || (method === "EMAIL" ? email : "");
 
-      setCurrentUserUid(data.user?.uid || "");
       setFirstName(uFirst);
       setLastName(uLast);
       setProfilePhone(uPhone);
@@ -196,7 +213,7 @@ function LoginFormContent() {
 
       // Si le nom et prénom sont déjà connus (ex: fournis par Google), on ne les redemande pas
       setNeedsNameFields(!(uFirst.trim().length >= 2 && uLast.trim().length >= 2));
-      // Si le numéro est déjà connu (ex: connexion par téléphone), on ne le redemande pas
+      // Si le numéro est déjà connu (ex: connexion par SMS), on ne le redemande pas
       setNeedsPhoneField(!uPhone);
 
       if (data.user?.residenceCity) {
@@ -210,7 +227,7 @@ function LoginFormContent() {
     }
   };
 
-  // Étape 2 : Vérifier le code OTP à 6 chiffres
+  // Étape 2 : Vérifier le code à 6 chiffres
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -222,27 +239,36 @@ function LoginFormContent() {
 
     setLoading(true);
     try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          loginMethod: method,
-          phone: method === "PHONE" ? phone : undefined,
-          email: method === "EMAIL" ? email : undefined,
-          otp: otp.trim(),
-          challengeToken,
-          referredBy: referralParam,
-        }),
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        handlePostAuthSuccess(data);
+      let firebaseUser;
+      if (method === "PHONE") {
+        if (!confirmationRef.current) {
+          setErrorMessage("Session SMS expirée. Demandez un nouveau code.");
+          setStep("REQUEST");
+          return;
+        }
+        firebaseUser = (await confirmationRef.current.confirm(otp.trim())).user;
       } else {
-        setErrorMessage(data.error || "Code OTP incorrect ou expiré.");
+        const res = await fetch("/api/auth/email-token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, otp: otp.trim() }),
+        });
+        const data = await res.json();
+        if (!data.success || !data.customToken) {
+          setErrorMessage(data.error || "Code OTP incorrect ou expiré.");
+          return;
+        }
+        firebaseUser = (await signInWithCustomToken(getFirebaseAuth(), data.customToken)).user;
       }
-    } catch {
-      setErrorMessage("Impossible de vérifier le code OTP.");
+
+      const login = await completeFirebaseLogin(firebaseUser, referralParam);
+      if (login.success) {
+        handlePostAuthSuccess(login);
+      } else {
+        setErrorMessage(login.error || "Connexion refusée.");
+      }
+    } catch (err) {
+      setErrorMessage(firebaseErrorMessage(err, "Impossible de vérifier le code OTP."));
     } finally {
       setLoading(false);
     }
@@ -269,11 +295,9 @@ function LoginFormContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          uid: currentUserUid,
           firstName: firstName.trim(),
           lastName: lastName.trim(),
-          phone: profilePhone.trim() || phone.trim(),
-          email: knownEmail || email.trim() || undefined,
+          phone: profilePhone.trim(),
           residenceCity,
         }),
       });
@@ -293,47 +317,38 @@ function LoginFormContent() {
     }
   };
 
-  // Connexion Google officielle via Popup OAuth Firebase
+  // Connexion Google officielle via le SDK Firebase (popup OAuth)
   const handleGoogleSignIn = async () => {
     setErrorMessage(null);
     setGoogleLoading(true);
     try {
-      const gUser = await launchOfficialGooglePopup();
+      const provider = new GoogleAuthProvider();
+      provider.addScope("email");
+      provider.addScope("profile");
+      provider.setCustomParameters({ prompt: "select_account" });
+      const cred = await signInWithPopup(getFirebaseAuth(), provider);
 
-      if (!gUser.email) {
+      if (!cred.user.email) {
         setErrorMessage("Impossible de récupérer l'adresse e-mail de ce compte Google.");
-        setGoogleLoading(false);
         return;
       }
 
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          loginMethod: "GOOGLE",
-          idToken: gUser.idToken,
-          name: gUser.displayName || gUser.email.split("@")[0],
-          referredBy: referralParam,
-        }),
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        handlePostAuthSuccess(data);
+      const login = await completeFirebaseLogin(cred.user, referralParam);
+      if (login.success) {
+        handlePostAuthSuccess(login);
       } else {
-        setErrorMessage(data.error || "Échec de l'authentification Google.");
+        setErrorMessage(login.error || "Échec de l'authentification Google.");
       }
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || "";
-      if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
-        // L'utilisateur a fermé la fenêtre Google volontairement
-      } else {
-        setErrorMessage("La connexion avec Google n'a pas pu aboutir. Veuillez réessayer.");
+      if (code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") {
+        setErrorMessage(firebaseErrorMessage(err, "La connexion avec Google n'a pas pu aboutir. Veuillez réessayer."));
       }
     } finally {
       setGoogleLoading(false);
     }
   };
+
 
   return (
     <div className="w-full max-w-md mx-auto">
@@ -521,7 +536,7 @@ function LoginFormContent() {
             <div className="mb-5 p-4 rounded-2xl bg-slate-900 text-white border border-slate-800 shadow-lg flex items-center justify-between gap-3">
               <div>
                 <p className="text-[11px] text-slate-400 font-semibold">
-                  Code de confirmation ({method === "PHONE" ? "SMS" : "E-mail"})
+                  Code de confirmation (mode test, e-mail non envoyé)
                 </p>
                 <p className="text-base font-black tracking-widest text-[#FFB800] font-mono">
                   {instantCodeBanner}
@@ -733,6 +748,9 @@ function LoginFormContent() {
           </button>
         </>
       )}
+
+      {/* Conteneur du reCAPTCHA invisible exigé par Firebase pour l'envoi des SMS */}
+      <div id="recaptcha-container" />
 
       <div className="mt-8 pt-6 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
         <Link

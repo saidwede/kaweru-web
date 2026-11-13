@@ -1,5 +1,6 @@
 "use client";
 
+import { signOutEverywhere } from "@/lib/firebaseClient";
 import { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import type { UserProfile, TripSummary, AgentItem, BookingItem, CompanyItem, TabType, ValidationMode } from "./_components/types";
@@ -78,7 +79,7 @@ export default function MasterExploitationPortal() {
   };
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await signOutEverywhere();
     router.push("/login");
     router.refresh();
   };

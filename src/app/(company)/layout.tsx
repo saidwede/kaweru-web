@@ -3,17 +3,9 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Lock, ArrowLeft, LogIn } from "lucide-react";
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
+import { SESSION_COOKIE, STAFF_ROLES, verifySessionCookie } from "@/lib/sessionCookie";
 
 export const dynamic = "force-dynamic";
-
-const STAFF_ROLES = [
-  "SUPER_ADMIN",
-  "COMPANY_ADMIN",
-  "STATION_MANAGER",
-  "TICKET_AGENT",
-  "ONBOARD_CONDUCTOR",
-];
 
 export default async function CompanyLayout({
   children,
@@ -21,7 +13,7 @@ export default async function CompanyLayout({
   children: React.ReactNode;
 }) {
   const cookieStore = await cookies();
-  const session = verifySessionToken(cookieStore.get(SESSION_COOKIE)?.value);
+  const session = await verifySessionCookie(cookieStore.get(SESSION_COOKIE)?.value);
 
   if (!session) {
     redirect("/login");

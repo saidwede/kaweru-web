@@ -1,5 +1,6 @@
 "use client";
 
+import { signOutEverywhere } from "@/lib/firebaseClient";
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import type { TripItem, CurrentUser, BookingSuccessData } from "./_home/types";
@@ -155,7 +156,7 @@ export default function Home() {
 
   // Déconnexion
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await signOutEverywhere();
     setCurrentUser(null);
     router.refresh();
   };

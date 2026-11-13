@@ -1,5 +1,6 @@
 "use client";
 
+import { signOutEverywhere } from "@/lib/firebaseClient";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -35,7 +36,7 @@ export default function ConductorListPage() {
   const [error, setError] = useState<string | null>(null);
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await signOutEverywhere();
     router.push("/login");
     router.refresh();
   };
@@ -49,7 +50,7 @@ export default function ConductorListPage() {
       if (data.success && Array.isArray(data.data)) {
         setTrips(data.data);
       } else {
-        setError(data.error?.message || "Impossible de charger les trajets.");
+        setError((typeof data.error === "string" ? data.error : data.error?.message) || "Impossible de charger les trajets.");
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erreur de connexion";

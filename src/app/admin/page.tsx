@@ -1,5 +1,6 @@
 "use client";
 
+import { signOutEverywhere } from "@/lib/firebaseClient";
 import { useEffect, useState, useMemo } from "react";
 import type { FormEvent } from "react";
 import { useRouter } from "next/navigation";
@@ -75,7 +76,7 @@ export default function MasterSuperAdminDashboard() {
   const [referralSaved, setReferralSaved] = useState(false);
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await signOutEverywhere();
     router.push("/login");
     router.refresh();
   };

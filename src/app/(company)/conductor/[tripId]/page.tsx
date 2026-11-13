@@ -111,7 +111,7 @@ function ConductorContent({
         setCheckinInput("");
         await loadData();
       } else {
-        setCheckinMessage({ text: json.error?.message || "Code invalide", isError: true });
+        setCheckinMessage({ text: (typeof json.error === "string" ? json.error : json.error?.message) || "Code invalide", isError: true });
       }
     } catch {
       setCheckinMessage({ text: "Erreur de connexion", isError: true });
