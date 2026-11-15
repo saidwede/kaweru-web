@@ -434,13 +434,14 @@ export default function MasterExploitationPortal() {
       {/* MODALE PROGRAMMER UN DÉPART (TRAJET) */}
       {showAddTripModal && (
         <AddTripModal
-          setShowAddTripModal={setShowAddTripModal} handleCreateTrip={handleCreateTrip}
-          userProfile={userProfile} companies={companies} selectedCompanyId={selectedCompanyId}
-          newTripCompanyId={newTripCompanyId} setNewTripCompanyId={setNewTripCompanyId}
-          newOrigin={newOrigin} setNewOrigin={setNewOrigin} newDestination={newDestination} setNewDestination={setNewDestination}
-          newDate={newDate} setNewDate={setNewDate} newTime={newTime} setNewTime={setNewTime}
-          newPrice={newPrice} setNewPrice={setNewPrice} newPlate={newPlate} setNewPlate={setNewPlate}
-          creatingTrip={creatingTrip}
+          setShowAddTripModal={setShowAddTripModal}
+          onTripCreated={() => {
+            notify("success", "Départ(s) programmé(s) avec succès !");
+            fetchTrips(selectedCompanyId);
+          }}
+          userProfile={userProfile}
+          companies={companies}
+          selectedCompanyId={selectedCompanyId}
         />
       )}
 

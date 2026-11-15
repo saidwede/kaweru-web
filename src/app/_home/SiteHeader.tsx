@@ -69,14 +69,14 @@ export default function SiteHeader({
                 </Link>
               )}
               <Link
-                href="/profile"
+                href="/dashboard"
                 className="inline-flex items-center gap-2 text-xs font-bold px-3.5 py-2.5 rounded-2xl bg-orange-50 border border-orange-200 text-[#FF6500] hover:bg-orange-100 transition shadow-sm"
               >
                 <User className="h-3.5 w-3.5" />
                 <span>
                   {currentUser.firstName
                     ? currentUser.firstName
-                    : currentUser.email?.split("@")[0] || "Mon Profil"}
+                    : currentUser.email?.split("@")[0] || "Mon Espace"}
                 </span>
                 {typeof currentUser.referralPoints === "number" && (
                   <span className="text-[10px] font-black bg-[#FF6500] text-white px-1.5 py-0.5 rounded-full">
