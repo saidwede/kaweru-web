@@ -14,6 +14,7 @@ import TripsTab from "./_components/TripsTab";
 import TicketsTab from "./_components/TicketsTab";
 import AgentsTab from "./_components/AgentsTab";
 import AddTripModal from "./_components/AddTripModal";
+import LinesPanel from "./_components/LinesPanel";
 import AddAgentModal from "./_components/AddAgentModal";
 
 export default function MasterExploitationPortal() {
@@ -56,14 +57,7 @@ export default function MasterExploitationPortal() {
 
   // Modale Nouveau Trajet (Pour Compagnie et Super Admin)
   const [showAddTripModal, setShowAddTripModal] = useState(false);
-  const [creatingTrip, setCreatingTrip] = useState(false);
-  const [newOrigin, setNewOrigin] = useState("Cotonou");
-  const [newDestination, setNewDestination] = useState("Parakou");
-  const [newDate, setNewDate] = useState(() => new Date().toISOString().split("T")[0]);
-  const [newTime, setNewTime] = useState("07:00");
-  const [newPrice, setNewPrice] = useState(8500);
-  const [newPlate, setNewPlate] = useState("");
-  const [newTripCompanyId, setNewTripCompanyId] = useState("");
+  const [linesVersion, setLinesVersion] = useState(0);
 
   // Modale Nouvel Agent
   const [showAddAgentModal, setShowAddAgentModal] = useState(false);
@@ -273,41 +267,7 @@ export default function MasterExploitationPortal() {
     }
   };
 
-  // 8. CRÉER UN DÉPART (TRAJET)
-  const handleCreateTrip = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setCreatingTrip(true);
 
-    try {
-      const res = await fetch("/api/trips", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          originCity: newOrigin,
-          destinationCity: newDestination,
-          departureDate: newDate,
-          departureTime: newTime,
-          priceFcfa: Number(newPrice),
-          busPlateNumber: newPlate.trim() || undefined,
-          targetCompanyId: userProfile?.role === "SUPER_ADMIN" ? (newTripCompanyId || selectedCompanyId) : undefined,
-        }),
-      });
-
-      const json = await res.json();
-      if (res.ok && json.success) {
-        notify("success", json.message || "Départ programmé avec succès !");
-        setShowAddTripModal(false);
-        setNewPlate("");
-        fetchTrips(selectedCompanyId);
-      } else {
-        notify("error", json.error || "Échec de programmation du trajet.");
-      }
-    } catch {
-      notify("error", "Erreur réseau.");
-    } finally {
-      setCreatingTrip(false);
-    }
-  };
 
   // 9. CRÉER UN AGENT DE GARE
   const handleCreateAgent = async (e: React.FormEvent) => {
@@ -403,6 +363,19 @@ export default function MasterExploitationPortal() {
           )}
 
           {/* ONGLET 2 : DÉPARTS & FICHES DE CHARGEMENT */}
+          {activeTab === "TRIPS" && (userProfile?.role === "COMPANY_ADMIN" || userProfile?.role === "SUPER_ADMIN") && (
+            <div className="mb-6">
+              <LinesPanel
+                companyId={selectedCompanyId}
+                isSuperAdmin={userProfile?.role === "SUPER_ADMIN"}
+                refreshKey={linesVersion}
+                onChanged={(message, isError) => {
+                  notify(isError ? "error" : "success", message);
+                  fetchTrips(selectedCompanyId);
+                }}
+              />
+            </div>
+          )}
           {activeTab === "TRIPS" && (
             <TripsTab
               dateFilter={dateFilter} setDateFilter={setDateFilter} customDate={customDate} setCustomDate={setCustomDate}
@@ -435,8 +408,9 @@ export default function MasterExploitationPortal() {
       {showAddTripModal && (
         <AddTripModal
           setShowAddTripModal={setShowAddTripModal}
-          onTripCreated={() => {
-            notify("success", "Départ(s) programmé(s) avec succès !");
+          onTripCreated={(message) => {
+            notify("success", message || "Départ(s) programmé(s) avec succès !");
+            setLinesVersion((v) => v + 1);
             fetchTrips(selectedCompanyId);
           }}
           userProfile={userProfile}

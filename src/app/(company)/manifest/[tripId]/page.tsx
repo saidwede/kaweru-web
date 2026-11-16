@@ -32,6 +32,7 @@ interface ManifestResponse {
     departureDate: string;
     departureTime: string;
     status: string;
+    busPlateNumber?: string;
     totalBusSeats: number;
     stats: {
       reservedKaweruCount: number;
@@ -90,6 +91,45 @@ function ManifestContent({
     const interval = setInterval(fetchManifest, 15000); // Polling 15s pour le guichet
     return () => clearInterval(interval);
   }, [tripId]);
+
+  const [tripAction, setTripAction] = useState<string | null>(null);
+
+  // Affectation du bus le jour du départ (chef de gare / responsable).
+  const handleAssignBus = async () => {
+    const plate = window.prompt("Plaque d'immatriculation du bus (ex : AY-4521-RB)", manifest?.trip.busPlateNumber || "");
+    if (!plate || !plate.trim()) return;
+    setTripAction("bus");
+    try {
+      const res = await fetch(`/api/trips/${tripId}/checkin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "ASSIGN_BUS", busPlateNumber: plate.trim() }),
+      });
+      const json = await res.json();
+      if (!json.success) window.alert(json.error || "Affectation impossible.");
+      await fetchManifest();
+    } finally {
+      setTripAction(null);
+    }
+  };
+
+  // Annulation d'un départ précis (refusée s'il y a déjà des ventes).
+  const handleCancelTrip = async () => {
+    if (!window.confirm("Annuler ce départ ? Il sera retiré de la vente. Impossible s'il y a déjà des billets vendus.")) return;
+    setTripAction("cancel");
+    try {
+      const res = await fetch(`/api/trips/${tripId}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const json = await res.json();
+      window.alert(json.success ? json.message : json.error || "Annulation impossible.");
+      await fetchManifest();
+    } finally {
+      setTripAction(null);
+    }
+  };
 
   const handleSeatClick = (seat: SeatData) => {
     setSelectedSeat(seat);
@@ -196,7 +236,13 @@ function ManifestContent({
                 <span className="rounded bg-orange-100 px-2 py-0.5 text-xs font-bold text-orange-800 uppercase">
                   {trip.companyName}
                 </span>
-                <span className="text-xs text-slate-500">Bus N° {trip.tripCode}</span>
+                <span className="text-xs text-slate-500">Départ {trip.tripCode}</span>
+                <span className={`text-xs font-bold ${trip.busPlateNumber ? "text-slate-700" : "text-amber-600"}`}>
+                  · Bus : {trip.busPlateNumber || "non affecté"}
+                </span>
+                {trip.status === "CANCELLED" && (
+                  <span className="rounded bg-rose-100 px-2 py-0.5 text-xs font-bold text-rose-700">ANNULÉ</span>
+                )}
               </div>
               <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mt-1">
                 Fiche de Chargement : {trip.originCity} ➔ {trip.destinationCity}
@@ -206,7 +252,25 @@ function ManifestContent({
               </p>
             </div>
 
-            <div className="flex items-center gap-3 print:hidden">
+            <div className="flex flex-wrap items-center gap-3 print:hidden">
+              {trip.status !== "CANCELLED" && (
+                <>
+                  <button
+                    onClick={handleAssignBus}
+                    disabled={tripAction !== null}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {trip.busPlateNumber ? "Changer de bus" : "Affecter un bus"}
+                  </button>
+                  <button
+                    onClick={handleCancelTrip}
+                    disabled={tripAction !== null}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    Annuler le départ
+                  </button>
+                </>
+              )}
               <button
                 onClick={() => fetchManifest()}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
