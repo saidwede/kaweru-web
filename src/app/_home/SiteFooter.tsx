@@ -6,6 +6,7 @@ import {
   PhoneCall,
 } from "lucide-react";
 import type { CurrentUser } from "./types";
+import { LEGAL_DOCS } from "@/lib/legal";
 
 interface SiteFooterProps {
   currentUser: CurrentUser | null;
@@ -95,7 +96,12 @@ export default function SiteFooter({ currentUser }: SiteFooterProps) {
 
         <div className="pt-6 border-t border-slate-200/60 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-400">
           <p>© {new Date().getFullYear()} Kaweru Bénin. Tous droits réservés.</p>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
+            {LEGAL_DOCS.map((d) => (
+              <Link key={d.href} href={d.href} className="hover:text-slate-700 transition">
+                {d.label}
+              </Link>
+            ))}
             <a href="mailto:contact@kaweru.bj" className="hover:text-slate-700 transition">
               Service client
             </a>

@@ -3,6 +3,7 @@
 import { signOutEverywhere } from "@/lib/firebaseClient";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import DeleteAccountSection from "./DeleteAccountSection";
 import { useRouter } from "next/navigation";
 import {
   Bus,
@@ -356,6 +357,7 @@ export default function ProfilePage() {
             </form>
           )}
         </div>
+        {!loading && role === "PASSENGER" && <DeleteAccountSection />}
       </main>
     </div>
   );

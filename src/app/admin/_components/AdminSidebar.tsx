@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Bus, Building2, LogOut, ShieldCheck, Wallet, LayoutDashboard, ArrowUpRight, Ticket, Gift, Compass } from "lucide-react";
+import { Bus, Building2, LogOut, ShieldCheck, Wallet, LayoutDashboard, ArrowUpRight, Ticket, Gift, Compass, Scale } from "lucide-react";
 import type { CompanyItem, StateSetter, TabType } from "./types";
 
 interface AdminSidebarProps {
@@ -129,6 +129,18 @@ export default function AdminSidebar({
               >
                 <Gift className="h-4 w-4" />
                 <span>Moteur de Parrainage</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab("LEGAL")}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl text-xs font-bold transition-all text-left cursor-pointer ${
+                  activeTab === "LEGAL"
+                    ? "bg-[#FF6500] text-white shadow-sm shadow-[#FF6500]/20"
+                    : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                }`}
+              >
+                <Scale className="h-4 w-4" />
+                <span>Paramètres légaux</span>
               </button>
             </div>
           </div>

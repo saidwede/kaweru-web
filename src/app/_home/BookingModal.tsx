@@ -249,6 +249,17 @@ export default function BookingModal({
                 )}
               </button>
             </div>
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+              En payant, vous acceptez les{" "}
+              <Link href="/cgv" target="_blank" className="underline hover:text-slate-700">
+                conditions de vente
+              </Link>{" "}
+              (billet non remboursable, reportable) et la{" "}
+              <Link href="/confidentialite" target="_blank" className="underline hover:text-slate-700">
+                politique de confidentialité
+              </Link>
+              .
+            </p>
           </form>
         ) : (
           <div className="space-y-5 text-center py-2">

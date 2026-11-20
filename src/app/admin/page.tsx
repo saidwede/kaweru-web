@@ -14,6 +14,7 @@ import OperationsTab from "./_components/OperationsTab";
 import FinancesTab from "./_components/FinancesTab";
 import RbacTab from "./_components/RbacTab";
 import ReferralTab from "./_components/ReferralTab";
+import LegalTab from "./_components/LegalTab";
 import AddCompanyModal from "./_components/AddCompanyModal";
 import { filterActivity, filterTrips } from "./_components/utils";
 import type {
@@ -352,6 +353,9 @@ export default function MasterSuperAdminDashboard() {
               handleSaveReferral={handleSaveReferral}
             />
           )}
+
+          {/* TAB 7 : PARAMÈTRES LÉGAUX (CGU, CGV, confidentialité, mentions) */}
+          {activeTab === "LEGAL" && <LegalTab />}
         </main>
       </div>
 

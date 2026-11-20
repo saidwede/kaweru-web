@@ -13,6 +13,7 @@ import {
 } from "firebase/auth";
 import { completeFirebaseLogin, getFirebaseAuth, type LoginResponse } from "@/lib/firebaseClient";
 import { normalizePhoneNumber } from "@/lib/config";
+import { TERMS_VERSION } from "@/lib/legal";
 import {
   Bus,
   Phone,
@@ -25,6 +26,8 @@ import {
   User,
   MapPin,
 } from "lucide-react";
+
+const TERMS_REQUIRED_MESSAGE = "Cochez la case pour accepter les conditions avant de continuer.";
 
 type LoginMethod = "PHONE" | "EMAIL";
 type AuthStep = "REQUEST" | "VERIFY" | "COMPLETE_PROFILE";
@@ -100,6 +103,7 @@ function LoginFormContent() {
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -142,6 +146,11 @@ function LoginFormContent() {
     setErrorMessage(null);
     setInfoMessage(null);
     setInstantCodeBanner(null);
+
+    if (!acceptedTerms) {
+      setErrorMessage(TERMS_REQUIRED_MESSAGE);
+      return;
+    }
 
     if (method === "PHONE" && phone.trim().length < 8) {
       setErrorMessage("Veuillez saisir un numéro de téléphone valide.");
@@ -261,7 +270,7 @@ function LoginFormContent() {
         firebaseUser = (await signInWithCustomToken(getFirebaseAuth(), data.customToken)).user;
       }
 
-      const login = await completeFirebaseLogin(firebaseUser, referralParam);
+      const login = await completeFirebaseLogin(firebaseUser, referralParam, TERMS_VERSION);
       if (login.success) {
         handlePostAuthSuccess(login);
       } else {
@@ -320,6 +329,10 @@ function LoginFormContent() {
   // Connexion Google officielle via le SDK Firebase (popup OAuth)
   const handleGoogleSignIn = async () => {
     setErrorMessage(null);
+    if (!acceptedTerms) {
+      setErrorMessage(TERMS_REQUIRED_MESSAGE);
+      return;
+    }
     setGoogleLoading(true);
     try {
       const provider = new GoogleAuthProvider();
@@ -333,7 +346,7 @@ function LoginFormContent() {
         return;
       }
 
-      const login = await completeFirebaseLogin(cred.user, referralParam);
+      const login = await completeFirebaseLogin(cred.user, referralParam, TERMS_VERSION);
       if (login.success) {
         handlePostAuthSuccess(login);
       } else {
@@ -579,6 +592,31 @@ function LoginFormContent() {
               E-mail (Code OTP)
             </button>
           </div>
+
+          {/* Acceptation unique des CGU, CGV et de la politique de confidentialité */}
+          <label className="flex items-start gap-2.5 mb-5 p-3 rounded-2xl bg-slate-50 border border-slate-200 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[#FF6500] shrink-0"
+            />
+            <span className="text-[11px] leading-relaxed text-slate-600">
+              J&apos;accepte les{" "}
+              <Link href="/cgu" target="_blank" className="font-bold text-slate-900 underline">
+                conditions d&apos;utilisation
+              </Link>
+              , les{" "}
+              <Link href="/cgv" target="_blank" className="font-bold text-slate-900 underline">
+                conditions de vente
+              </Link>{" "}
+              et la{" "}
+              <Link href="/confidentialite" target="_blank" className="font-bold text-slate-900 underline">
+                politique de confidentialité
+              </Link>
+              .
+            </span>
+          </label>
 
           {step === "REQUEST" ? (
             <form onSubmit={handleRequestOtp} className="space-y-4">

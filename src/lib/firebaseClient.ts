@@ -49,12 +49,16 @@ export interface LoginResponse {
  * 2. le jeton est rafraîchi pour porter ces claims ;
  * 3. /api/auth/session le transforme en cookie httpOnly `__session` pour le site web.
  */
-export async function completeFirebaseLogin(user: User, referredBy?: string): Promise<LoginResponse> {
+export async function completeFirebaseLogin(
+  user: User,
+  referredBy?: string,
+  acceptedTermsVersion?: string
+): Promise<LoginResponse> {
   const idToken = await user.getIdToken();
   const res = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
-    body: JSON.stringify({ referredBy: referredBy || undefined }),
+    body: JSON.stringify({ referredBy: referredBy || undefined, acceptedTermsVersion }),
   });
   const data = (await res.json()) as LoginResponse;
   if (!data.success) {

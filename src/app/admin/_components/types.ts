@@ -87,7 +87,7 @@ export interface CompanyItem {
   } | null;
 }
 
-export type TabType = "OVERVIEW" | "COMPANIES" | "OPERATIONS" | "FINANCES" | "RBAC" | "REFERRAL";
+export type TabType = "OVERVIEW" | "COMPANIES" | "OPERATIONS" | "FINANCES" | "RBAC" | "REFERRAL" | "LEGAL";
 
 export type ActivityItem = AdminOverviewData["recentActivity"][number];
 export type TripItem = AdminOverviewData["trips"][number];

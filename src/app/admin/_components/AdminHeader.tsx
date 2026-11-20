@@ -104,6 +104,7 @@ export default function AdminHeader({
             ["FINANCES", "Finances"],
             ["RBAC", "Rôles"],
             ["REFERRAL", "Parrainage"],
+            ["LEGAL", "Légal"],
           ] as const
         ).map(([t, label]) => (
           <button
